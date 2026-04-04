@@ -1,0 +1,6 @@
+[Unit]
+Description=Start Starship services
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl start starship-web.service starship-engine.service

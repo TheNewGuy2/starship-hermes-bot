@@ -1,0 +1,156 @@
+installed_apps:
+  - starship_engine.apps.heston
+  - starship_engine.apps.trend_risk
+  - starship_engine.apps.sentinel
+  - starship_engine.apps.exit_planner
+  - starship_engine.apps.captain_log
+  - starship_engine.apps.directives
+  - starship_engine.apps.comms
+  - starship_engine.apps.data_persist
+  - starship_engine.apps.context_overnight
+  - starship_engine.apps.stream
+  - starship_engine.apps.auth
+
+runner:
+  dry_run: false
+  ignore_time_window: true
+  signal_mode: spx
+  exec_symbol: SPX
+  context_symbol: ES
+  context_exchange: CME
+  context_code: ES
+  warmup_bars: 32
+  backfill_bars: 600
+  candle_minutes_back_override: 900
+  backfill_prev_session_open: true
+  idle_warn_seconds: 60
+  idle_slack_cooldown: 600
+  early_alerts_enabled: false
+  early_min_bars: 18
+  early_require_calm: true
+  early_require_rv30_le_rv60: true
+  early_vrp_min: 1.6
+  early_mr_max: 0.03
+  early_rv60_min: 0.06
+  early_vov_max: null
+  policy_path: configs/policies/active.yaml
+  require_ema_touch: false
+  policy_name: ic_harvest_v1
+  policy_max_trades_per_day: 3
+  policy_entry_cutoff_trades: 2
+  policy_per_trade_stop_r: null
+  policy_daily_stop_r: 1.5
+  policy_no_new_entries_after_cst: "13:45"
+  policy_exit_all_by_cst: "14:45"
+  policy_tp_targets: "0.45,0.25,0.25"
+  log_level: INFO
+  log_file: logs/bot.log
+  log_daily: false
+  log_daily_backup_count: 14
+
+market_persist:
+  candles:
+    enabled: true
+    out_dir: data/candles
+    file_prefix: SPX_5m
+  options:
+    enabled: true
+    out_dir: data/options
+    file_prefix: SPX_0DTE
+    dte: 0
+
+trend_risk:
+  enabled: false
+  adx_len: 14
+  di_len: 14
+  slope_lookback: 3
+  use_rv_modifier: true
+  block: 8
+  caution: 6
+  stretch_atr_len: 5
+  stretch_low: 0.7
+  stretch_high: 1.3
+  di_spread_low: 6
+  di_spread_high: 12
+  adx_slope_low: 0.5
+  adx_slope_high: 1.5
+  adx_b1: 20
+  adx_b2: 25
+  adx_b3: 30
+  adx_b4: 35
+  policy: veto_or_tier
+
+sentinel:
+  enabled: true
+  rth_only: true
+  timezone: America/Chicago
+  heartbeat_enabled: true
+  heartbeat_minutes: 15
+  heartbeat_rth_only: true
+  score_thresholds: [70, 50, 30]
+  score_hysteresis: 5
+  vrp_min: 1.25
+  vrp_caution_min: 1.10
+  mr_max: 0.05
+  vov_caution: 0.25
+  vov_hostile: 0.35
+  vov_hysteresis: 0.02
+  cooldown_regime_change_seconds: 600
+  cooldown_score_cross_seconds: 600
+  cooldown_vrp_seconds: 600
+  cooldown_vov_seconds: 600
+  cooldown_mr_seconds: 600
+
+captain_log:
+  enabled: false
+  out_dir: ./state_logs
+  fmt: jsonl
+  every_bars: 1
+
+comms:
+  engine_ingest_url: http://127.0.0.1:8000/engine/ingest
+  engine_ingest_secret: ""
+  engine_facts_jsonl: data/facts.jsonl
+  engine_run_id: ""
+
+exit_planner:
+  enabled: false
+  targets_enabled: true
+  eta_enabled: false
+  slack_enabled: false
+  slack_prefix: "[EXIT]"
+  tier_a_min_score: 4
+  tier_b_min_score: 2
+  tier_a_min: 25
+  tier_a_max: 35
+  tier_b_min: 15
+  tier_b_max: 25
+  tier_c_min: 10
+  tier_c_max: 15
+  eta_scenario_mode: expected_move
+  eta_fixed_points: 10
+  eta_expected_move_minutes: 30
+  eta_max_minutes: 180
+  eta_step_seconds: 60
+  vov_window: 3
+  vov_stable_threshold: 0.002
+
+heston:
+  enabled: true
+  vrp_min: 1.25
+  vrp_max: null
+  mr_max: 0.05
+  rv60_min: 0.05
+  vov_max: null
+
+context_overnight:
+  enabled: false
+
+auth:
+  client_id: ""
+  client_secret: ""
+  refresh_token: ""
+  is_test: false
+
+stream:
+  enabled: true

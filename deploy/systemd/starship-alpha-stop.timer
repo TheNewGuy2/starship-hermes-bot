@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop Starship services weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 16:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

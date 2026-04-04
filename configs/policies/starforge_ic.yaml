@@ -1,0 +1,21 @@
+schema_version: 1
+name: starforge_ic
+created_at: '2026-01-29T23:41:26.372272'
+source:
+  type: alpha_sim_lab
+  plugin: alpha_sim_lab.ic_filter
+  run_dir: runs/alpha_sim_lab/suites/ic_filter_phase25/20260129_163655/runs/seq_tp_real_cutoff3_stop0p5/base
+  suite: null
+  params_hash: e727d09c49
+strategy: 0DTE_SPX_IC
+tp_targets:
+- 0.14
+- 0.1
+- 0.1
+max_trades_per_day: 3
+entry_cutoff_trades: 3
+daily_stop_r: 1.5
+per_trade_stop_r: 0.5
+exit_all_by_cst: '14:45'
+no_new_entries_after_cst: '13:45'
+notes: null

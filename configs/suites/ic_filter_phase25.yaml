@@ -1,0 +1,77 @@
+schema_version: 1
+suite_name: "ic_filter_phase25"
+
+defaults:
+  plugin: "alpha_sim_lab.ic_filter"
+  mode: "pnl"
+  phase: 2.5
+
+  data_source: "yahoo"
+  symbol: "^GSPC"
+  vix_symbol: "^VIX"
+  start: "2016-01-01"
+  end: "2026-01-29"
+
+  vrp_min: 1.25
+  rv60_min: 0.05
+  mr_max: 0.05
+
+  loss_model: "scaled"
+  loss_floor_r: 1.0
+  max_loss_r: 2.0
+  stop_r: 1.5
+  warmup_entry_mode: "slot_proxy"
+  warmup_skip_first_trade: true
+  earliest_entry_time_cst: "10:50"
+
+tests:
+  # - name: "sweep_tp_cutoff2_stop1p5"
+  #   params:
+  #     ic_range: 0.012
+  #     max_trades_per_day: 3
+  #     entry_cutoff_trades: 2
+  #     daily_stop_r: 1.5
+  #   sweep:
+  #     tp_r: [0.25, 0.35, 0.45, 0.50]
+  # - name: "sweep_tp_real_cutoff2_stop1p5"
+  #   params:
+  #     ic_range: 0.012
+  #     max_trades_per_day: 3
+  #     entry_cutoff_trades: 2
+  #     daily_stop_r: 1.5
+  #   sweep:
+  #     tp_r: [0.10, 0.12, 0.14, 0.18]
+
+  - name: "seq_tp_cutoff3_stop1p5"
+    params:
+      ic_range: 0.012
+      max_trades_per_day: 3
+      entry_cutoff_trades: 3
+      daily_stop_r: 1.5
+      tp_r_seq: [0.45, 0.25, 0.25]
+
+  - name: "seq_tp_real_cutoff3_stop0p5"
+    params:
+      ic_range: 0.012
+      max_trades_per_day: 3
+      entry_cutoff_trades: 3
+      stop_r: 0.5
+      daily_stop_r: 1.5
+      tp_r_seq: [0.14, 0.10, 0.10]
+  - name: "seq_tp_real_cutoff3_stop0p2"
+    params:
+      ic_range: 0.012
+      max_trades_per_day: 3
+      entry_cutoff_trades: 3
+      stop_r: 0.25
+      daily_stop_r: 0.75
+      tp_r_seq: [0.14, 0.10, 0.10]
+
+  # - name: "sweep_tp_real_cutoff2_stop1p0"
+  #   params:
+  #     ic_range: 0.012
+  #     max_trades_per_day: 3
+  #     entry_cutoff_trades: 2
+  #     daily_stop_r: 1.0
+  #   sweep:
+  #     tp_r: [0.10, 0.12, 0.14, 0.18]

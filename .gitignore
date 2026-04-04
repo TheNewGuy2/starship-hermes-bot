@@ -1,0 +1,22 @@
+.venv
+__pycache__/
+*.pyc
+.DS_Store
+__MACOSX/
+
+data/
+logs/
+reports/
+runs/
+.pytest*
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+.env
+.envrc
+
+# Local bot config
+configs/bot.yaml

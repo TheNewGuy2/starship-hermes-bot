@@ -1,0 +1,47 @@
+flowchart TD
+    A[Runner starts engine
+starship_engine/runner.py] --> B[Engine.run_all wires stream callbacks
+starship_engine/app/engine.py]
+    B --> C[DXLink stream
+starship_engine/apps/stream/stream.py]
+
+    C -->|Candle events| D[Engine.on_candle
+starship_engine/app/engine.py]
+    C -->|Quote events| E[Engine.on_quote
+starship_engine/app/engine.py]
+    C -->|Greeks events| F[Engine.on_greeks
+starship_engine/app/engine.py]
+
+    D --> G{Backfill / stale filter}
+    G -->|Backfill mode| H[Seed backfill buffer
+engine.py]
+    G -->|Valid closed bar| I[Closed bar finalized
+engine.py]
+
+    I --> K["Persist candle JSONL (always) apps/data_persist/store.py"]
+    I --> L["Persist options snapshot JSONL (if IV available) apps/data_persist/store.py"]
+
+    I --> W{Warmup done?}
+    W -->|No| X["Buffer only (no gate/trend)"]
+    W -->|Yes| J[process_bar_and_print
+engine.py]
+
+    J --> M[Compute features & gate
+engine.py]
+    M --> N[Publish MARKET_FACT
+engine.py → comms publisher]
+    M --> O{Decision ok?}
+    O -->|No| P[Emit blocked / early events]
+    O -->|Yes| Q[Build condor & exit plan
+engine.py]
+    Q --> R[Publish STRATEGY_SIGNAL
+engine.py → comms publisher]
+
+    E --> S[Update latest SPX mid
+engine.py]
+    F --> T[Cache greeks by symbol
+engine.py]
+
+    N --> U[Comms HTTP + JSONL
+apps/comms/publishers.py]
+    R --> U

@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop Starship services
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop starship-engine.service starship-web.service

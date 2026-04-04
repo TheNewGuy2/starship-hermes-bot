@@ -1,0 +1,20 @@
+[project]
+name = "starship-web"
+version = "1.0.0"
+description = "Starship Alpha web/slack service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "python-multipart",
+  "requests",
+  "python-dotenv",
+  "starship-shared",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starship_web"]

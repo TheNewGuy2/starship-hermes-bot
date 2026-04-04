@@ -1,0 +1,22 @@
+[Unit]
+Description=Starship Engine (SPX Bot)
+After=network-online.target starship-web.service
+Wants=network-online.target starship-web.service
+RequiresMountsFor=/mnt/starship-data
+
+[Service]
+Type=simple
+User=starship
+Group=starship
+WorkingDirectory=/opt/starship-alpha/app
+EnvironmentFile=/opt/starship-alpha/.env
+
+ExecStart=/opt/starship-alpha/app/.venv/bin/python -m starship_engine.runner
+
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

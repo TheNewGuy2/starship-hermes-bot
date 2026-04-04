@@ -1,0 +1,25 @@
+[project]
+name = "starship-alpha"
+version = "0.1.0"
+description = "Starship Alpha monorepo"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "starship-shared",
+  "starship-engine",
+  "starship-web",
+  "starship-simlab",
+  "starship-reports",
+]
+
+[tool.uv.sources]
+starship-shared = { path = "packages/starship_shared" }
+starship-engine = { path = "packages/starship_engine" }
+starship-web = { path = "packages/starship_web" }
+starship-simlab = { path = "packages/starship_simlab" }
+starship-reports = { path = "packages/starship_reports" }
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+]
