@@ -1,0 +1,41 @@
+# Copy deploy/env/.env.example to deploy/env/starship.env before using this file.
+services:
+  starship-web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+    env_file:
+      - ../env/starship.env
+    environment:
+      ENGINE_CONFIG_PATH: /opt/starship-alpha/app/configs/bot.yaml
+      STARSHIP_ENV_FILE: /run/starship/starship.env
+      STARSHIP_SECRETS_DIR: /run/starship/secrets
+    volumes:
+      - ../../configs:/opt/starship-alpha/app/configs:ro
+      - ../../data:/opt/starship-alpha/app/data
+      - ../../logs:/opt/starship-alpha/app/logs
+      - ../env/starship.env:/run/starship/starship.env:ro
+      - ../env/secrets:/run/starship/secrets:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  starship-engine:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.engine
+    env_file:
+      - ../env/starship.env
+    environment:
+      ENGINE_CONFIG_PATH: /opt/starship-alpha/app/configs/bot.yaml
+      STARSHIP_ENV_FILE: /run/starship/starship.env
+      STARSHIP_SECRETS_DIR: /run/starship/secrets
+    volumes:
+      - ../../configs:/opt/starship-alpha/app/configs:ro
+      - ../../data:/opt/starship-alpha/app/data
+      - ../../logs:/opt/starship-alpha/app/logs
+      - ../env/starship.env:/run/starship/starship.env:ro
+      - ../env/secrets:/run/starship/secrets:ro
+    depends_on:
+      - starship-web
+    restart: unless-stopped

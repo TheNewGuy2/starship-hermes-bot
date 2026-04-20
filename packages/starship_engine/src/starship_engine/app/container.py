@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from starship_shared.policy import TradePolicy
 
-from starship_engine.apps.auth.logic import create_tt_session
+from starship_engine.apps.auth.logic import require_tastytrade_session
 from starship_engine.apps.captain_log.app import build_state_log_handler
 from starship_engine.apps.comms.publishers import (
     FanoutPublisher,
@@ -130,7 +130,7 @@ def build_container(
     engine_settings: Any, runtime: RuntimeSettings, log: Any
 ) -> EngineDeps:
     state_log_handler = build_state_log_handler(engine_settings.captain_log)
-    session = create_tt_session(settings=engine_settings.auth)
+    session = require_tastytrade_session(engine_settings.auth)
 
     context_enabled = (
         runtime.signal_mode == "es_context" or engine_settings.context_overnight.enabled

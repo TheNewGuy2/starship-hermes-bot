@@ -9,7 +9,10 @@ Type=simple
 User=starship
 Group=starship
 WorkingDirectory=/opt/starship-alpha/app
-EnvironmentFile=/opt/starship-alpha/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=STARSHIP_ENV_FILE=/etc/starship-alpha/starship.env
+Environment=STARSHIP_SECRETS_DIR=/etc/starship-alpha/secrets
+EnvironmentFile=-/etc/starship-alpha/starship.env
 
 ExecStart=/opt/starship-alpha/app/.venv/bin/python -m uvicorn starship_web.app:app --host 127.0.0.1 --port 8000
 

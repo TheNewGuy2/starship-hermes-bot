@@ -58,5 +58,11 @@ Secrets live in `.env` at the repo root:
 - `TT_REFRESH_TOKEN`
 - `TT_IS_TEST`
 - `SLACK_WEBHOOK_URL`
+- `STARSHIP_ADMIN_USER`
+- `STARSHIP_ADMIN_PASSWORD`
 
 The web server reads `comms.engine_ingest_secret` from `configs/bot.yaml` (or `ENGINE_INGEST_SECRET` if you still set it for back-compat).
+
+For server deploys, both engine and web also support:
+- `STARSHIP_ENV_FILE`
+- `STARSHIP_SECRETS_DIR`

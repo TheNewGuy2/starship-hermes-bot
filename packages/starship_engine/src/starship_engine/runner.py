@@ -4,12 +4,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 from starship_engine.app.container import RuntimeSettings, build_container
 from starship_engine.app.engine import Engine
 from starship_engine.apps.captain_log.logging import get_logger, setup_logging
 from starship_engine.apps.stream.symbols import SPX_INDEX_SYMBOL
+from starship_engine.config import load_runtime_env
 from starship_engine.core.apps import load_apps
 from starship_engine.core.settings import apply_env_overrides, load_engine_settings
 
@@ -28,7 +27,7 @@ def _hash_secret(value: str) -> str:
 
 
 def main() -> None:
-    load_dotenv()
+    dotenv_path, secrets_dir = load_runtime_env()
 
     # -----------------------------
     # ENV
@@ -49,6 +48,11 @@ def main() -> None:
         engine_settings.comms.engine_ingest_url,
         _hash_secret(engine_settings.comms.engine_ingest_secret),
         engine_settings.comms.engine_facts_jsonl,
+    )
+    log.info(
+        "[CONFIG] runtime_env dotenv=%s secrets_dir=%s",
+        (dotenv_path if dotenv_path else "not_found"),
+        (secrets_dir if secrets_dir else "not_set"),
     )
     installed_apps = engine_settings.installed_apps
     if installed_apps:

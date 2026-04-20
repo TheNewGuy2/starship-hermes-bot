@@ -105,10 +105,15 @@ def apply_env_overrides(
 ) -> EngineSettings:
     au = settings.auth.model_dump()
     auth_map: dict[str, tuple[str, type]] = {
+        "BROKER_PROVIDER": ("provider", str),
         "TT_CLIENT_ID": ("client_id", str),
         "TT_CLIENT_SECRET": ("client_secret", str),
         "TT_REFRESH_TOKEN": ("refresh_token", str),
         "TT_IS_TEST": ("is_test", bool),
+        "ETRADE_CONSUMER_KEY": ("etrade_consumer_key", str),
+        "ETRADE_CONSUMER_SECRET": ("etrade_consumer_secret", str),
+        "ETRADE_OAUTH_TOKEN": ("etrade_oauth_token", str),
+        "ETRADE_OAUTH_TOKEN_SECRET": ("etrade_oauth_token_secret", str),
     }
     for env_key, (field, cast) in auth_map.items():
         raw = env.get(env_key)

@@ -6,12 +6,16 @@ from typing import Any
 import requests
 from starship_shared.policy import TradePolicy
 
+from starship_web.config import load_runtime_env
 from starship_web.policy_format import format_policy_lines
 from starship_web.sentinel_format import (
     format_sentinel_batch,
     format_sentinel_event,
     format_sentinel_event_blocks,
 )
+
+
+_dotenv_path, _secrets_dir = load_runtime_env()
 
 
 def get_slack_webhook_url() -> str:
@@ -21,7 +25,7 @@ def get_slack_webhook_url() -> str:
 def send_slack_message(
     message: str | dict[str, Any], *, webhook_url: str | None = None
 ) -> bool:
-    url = get_slack_webhook_url()
+    url = (webhook_url or get_slack_webhook_url()).strip()
     if not url:
         return False
     payload = {"text": message} if isinstance(message, str) else message
