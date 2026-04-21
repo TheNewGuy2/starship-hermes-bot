@@ -43,6 +43,10 @@ runner:
   policy_no_new_entries_after_cst: "13:45"
   policy_exit_all_by_cst: "14:45"
   policy_tp_targets: "0.45,0.25,0.25"
+  etrade_poll_seconds: 60
+  etrade_signal_cooldown_seconds: 300
+  etrade_run_once: false
+  etrade_option_roots: "SPX,SPXW,XSP"
   log_level: INFO
   log_file: logs/bot.log
   log_daily: false

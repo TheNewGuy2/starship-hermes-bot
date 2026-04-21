@@ -5,9 +5,11 @@ description = "Starship Alpha engine"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "starship-shared",
+  "starship-web",
   "tastytrade",
   "numpy",
   "requests",
+  "requests-oauthlib",
   "python-dotenv",
   "rich",
   "typer",

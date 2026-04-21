@@ -231,7 +231,71 @@ def _build_signal_blocks(fact: dict[str, Any]) -> dict[str, Any]:
     return {"text": header, "blocks": blocks}
 
 
+def _build_etrade_probe_blocks(fact: dict[str, Any]) -> dict[str, Any]:
+    metrics = fact.get("metrics", {}) or {}
+    state = fact.get("state", {}) or {}
+    signal = fact.get("signal", {}) or {}
+    market = fact.get("market", {}) or {}
+
+    underlier = str(market.get("underlier", "SPX"))
+    ts_cst = str(state.get("ts_cst") or fact.get("ts", ""))
+    expiry = str(signal.get("probe_expiry") or state.get("probe_expiry") or "n/a")
+    root = str(signal.get("probe_root") or state.get("probe_root") or underlier)
+    chain_size = signal.get("greeks_count", state.get("greeks_count", 0))
+    quote_bid = _fmt_float(signal.get("quote_bid"), ".2f")
+    quote_ask = _fmt_float(signal.get("quote_ask"), ".2f")
+    quote_last = _fmt_float(signal.get("quote_last"), ".2f")
+    spot = _fmt_float(metrics.get("close"), ".2f")
+    iv_atm = _fmt_pct(metrics.get("iv_atm"))
+    iv_disp = _fmt_pct(metrics.get("iv_disp"))
+    net_delta = _fmt_float(signal.get("net_short_delta"), "+.3f")
+    warnings = signal.get("warnings") or []
+    warning_text = "none"
+    if isinstance(warnings, list) and warnings:
+        warning_text = "\n".join(f"• {str(item)}" for item in warnings[:4])
+
+    condor_md = (
+        f"*Condor Snapshot*  _(expiry: {expiry}, root: {root})_\n"
+        f"• *PUT:* `Short {_fmt_float(signal.get('short_put'), '.0f')}` / `Long {_fmt_float(signal.get('long_put'), '.0f')}`\n"
+        f"• *CALL:* `Short {_fmt_float(signal.get('short_call'), '.0f')}` / `Long {_fmt_float(signal.get('long_call'), '.0f')}`\n"
+        f"• *NetΔ (shorts):* `{net_delta}`"
+    )
+    market_md = (
+        f"*Market* ({underlier} snapshot @ {ts_cst})\n"
+        f"• *Spot:* `{spot}`  |  *Bid:* `{quote_bid}`  |  *Ask:* `{quote_ask}`  |  *Last:* `{quote_last}`\n"
+        f"• *IV_ATM:* `{iv_atm}`  |  *IV Disp:* `{iv_disp}`  |  *Chain Greeks:* `{chain_size}`"
+    )
+    quality_md = (
+        "*Data Quality*\n"
+        f"• *Provider:* `etrade`\n"
+        f"• *Warnings:* {warning_text}"
+    )
+    header = f"E*TRADE Condor Probe ({underlier})"
+    return {
+        "text": header,
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": header}},
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Live E*TRADE quote + option-chain snapshot published by the engine probe.",
+                    }
+                ],
+            },
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": market_md}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": condor_md}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": quality_md}},
+        ],
+    }
+
+
 def format_signal_message(fact: dict[str, Any]) -> dict[str, Any]:
+    state = fact.get("state", {}) or {}
+    if str(state.get("data_source", "")).strip().lower() == "etrade_probe":
+        return _build_etrade_probe_blocks(fact)
     return _build_signal_blocks(fact)
 
 

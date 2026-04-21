@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
-from starship_engine.app.container import RuntimeSettings, build_container
-from starship_engine.app.engine import Engine
+from starship_engine.apps.auth.settings import AuthSettings
 from starship_engine.apps.captain_log.logging import get_logger, setup_logging
-from starship_engine.apps.stream.symbols import SPX_INDEX_SYMBOL
+from starship_engine.apps.etrade_probe.app import run_etrade_probe
+from starship_engine.brokers.base import BrokerProvider
 from starship_engine.config import load_runtime_env
 from starship_engine.core.apps import load_apps
 from starship_engine.core.settings import apply_env_overrides, load_engine_settings
@@ -24,6 +25,14 @@ def _hash_secret(value: str) -> str:
     import hashlib
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+
+
+def _broker_provider(settings: AuthSettings) -> BrokerProvider:
+    raw = (settings.provider or "").strip().lower() or BrokerProvider.TASTYTRADE.value
+    try:
+        return BrokerProvider(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Unsupported broker provider: {settings.provider!r}") from exc
 
 
 def main() -> None:
@@ -54,6 +63,8 @@ def main() -> None:
         (dotenv_path if dotenv_path else "not_found"),
         (secrets_dir if secrets_dir else "not_set"),
     )
+    provider = _broker_provider(engine_settings.auth)
+    log.info("[AUTH] broker_provider=%s", provider.value)
     installed_apps = engine_settings.installed_apps
     if installed_apps:
         try:
@@ -78,7 +89,7 @@ def main() -> None:
         log.warning("Unknown SIGNAL_MODE=%s; defaulting to spx", signal_mode)
         signal_mode = "spx"
 
-    exec_symbol = runner_cfg.exec_symbol or SPX_INDEX_SYMBOL
+    exec_symbol = runner_cfg.exec_symbol or "SPX"
     context_symbol = runner_cfg.context_symbol or "/ES"
     context_exchange = runner_cfg.context_exchange
     context_code = runner_cfg.context_code
@@ -108,7 +119,7 @@ def main() -> None:
     # EMA touch gating can be disabled early in the session before the EMA is warmed up.
     # Set REQUIRE_EMA_TOUCH=false to ignore the EMA/touch filter and rely on other signals.
     require_ema_touch = runner_cfg.require_ema_touch
-    runtime = RuntimeSettings(
+    runtime_kwargs = dict(
         engine_cfg_path=engine_cfg_path,
         dry_run=dry_run,
         ignore_time_window=ignore_time_window,
@@ -142,6 +153,15 @@ def main() -> None:
         policy_exit_all_by_cst=runner_cfg.policy_exit_all_by_cst,
         policy_tp_targets=runner_cfg.policy_tp_targets,
     )
+    if provider is BrokerProvider.ETRADE:
+        log.info("Runner starting in E*TRADE probe mode")
+        runtime = SimpleNamespace(**runtime_kwargs)
+        run_etrade_probe(engine_settings=engine_settings, runtime=runtime, log=log)
+        return
+    from starship_engine.app.container import RuntimeSettings, build_container
+    from starship_engine.app.engine import Engine
+
+    runtime = RuntimeSettings(**runtime_kwargs)
     deps = build_container(engine_settings, runtime, log)
     log.info("Runner starting")
     log.info(
@@ -158,7 +178,7 @@ def main() -> None:
     )
     log.info(
         "PUBLISH url=%s jsonl=%s",
-        (engine_ingest_url if engine_ingest_secret else "disabled"),
+        (engine_ingest_url or "disabled"),
         engine_facts_jsonl or "disabled",
     )
     log.info(

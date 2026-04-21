@@ -161,9 +161,9 @@ def build_container(
     engine_ingest_secret = engine_settings.comms.engine_ingest_secret
     engine_facts_jsonl = engine_settings.comms.engine_facts_jsonl
     publisher_list = []
-    if engine_ingest_url and engine_ingest_secret:
+    if engine_ingest_url:
         publisher_list.append(
-            HttpPublisher(url=engine_ingest_url, secret=engine_ingest_secret)
+            HttpPublisher(url=engine_ingest_url, secret=engine_ingest_secret or "")
         )
     if engine_facts_jsonl:
         publisher_list.append(JsonlPublisher(path=engine_facts_jsonl))

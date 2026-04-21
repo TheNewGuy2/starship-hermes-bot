@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +14,29 @@ from starship_engine.runner import main as run_main
 app = typer.Typer(add_completion=False)
 policy_app = typer.Typer(help="Policy tools")
 app.add_typer(policy_app, name="policy")
+
+
+def _temp_config_with_runner_overrides(**runner_overrides: object) -> tuple[Path, object]:
+    import yaml
+
+    from starship_engine.core.settings import RunnerSettings, load_engine_settings
+
+    cfg_path = Path(os.environ.get("ENGINE_CONFIG_PATH", "configs/bot.yaml"))
+    settings = load_engine_settings(cfg_path)
+    runner = settings.runner.model_dump()
+    for field, value in runner_overrides.items():
+        if value is None:
+            continue
+        runner[field] = value
+    settings.runner = RunnerSettings.model_validate(runner)
+    with tempfile.NamedTemporaryFile(
+        prefix="starship-config-", suffix=".yaml", delete=False
+    ) as tmp:
+        tmp.write(
+            yaml.safe_dump(settings.model_dump(), sort_keys=False).encode("utf-8")
+        )
+        path = Path(tmp.name)
+    return path, settings
 
 
 @app.command("run")
@@ -39,49 +64,87 @@ def run(
     early_rv60_min: Optional[float] = typer.Option(None, help="Early RV60 min"),
     early_vov_max: Optional[float] = typer.Option(None, help="Early VoV max"),
 ) -> None:
-    import os
-    import tempfile
+    config_path, _settings = _temp_config_with_runner_overrides(
+        signal_mode=signal_mode,
+        context_symbol=context_symbol,
+        context_exchange=context_exchange,
+        context_code=context_code,
+        warmup_bars=warmup_bars,
+        dry_run=dry_run,
+        ignore_time_window=ignore_time_window,
+        require_ema_touch=require_ema_touch,
+        early_alerts_enabled=early_alerts_enabled,
+        early_min_bars=early_min_bars,
+        early_require_calm=early_require_calm,
+        early_require_rv30_le_rv60=early_require_rv30_le_rv60,
+        early_vrp_min=early_vrp_min,
+        early_mr_max=early_mr_max,
+        early_rv60_min=early_rv60_min,
+        early_vov_max=early_vov_max,
+    )
+    os.environ["ENGINE_CONFIG_PATH"] = str(config_path)
+    run_main()
 
-    import yaml
 
-    from starship_engine.core.settings import RunnerSettings, load_engine_settings
+@app.command("probe-etrade")
+def probe_etrade(
+    once: bool = typer.Option(
+        True, "--once/--loop", help="Run one E*TRADE probe cycle or keep polling"
+    ),
+    poll_seconds: int = typer.Option(60, help="Polling interval when running in loop mode"),
+    cooldown_seconds: int = typer.Option(
+        300, help="Minimum seconds between repeated identical alerts"
+    ),
+    option_roots: str = typer.Option(
+        "SPX,SPXW,XSP", help="Comma-separated option roots to try in order"
+    ),
+    direct_slack: bool = typer.Option(
+        True, "--direct-slack/--no-direct-slack", help="Send Slack directly from the command"
+    ),
+    publish_web: bool = typer.Option(
+        False, "--publish-web/--no-publish-web", help="Also publish facts to the local web ingest endpoint"
+    ),
+    write_jsonl: bool = typer.Option(
+        True, "--write-jsonl/--no-write-jsonl", help="Append emitted facts to the configured JSONL file"
+    ),
+) -> None:
+    from starship_engine.apps.captain_log.logging import get_logger, setup_logging
+    from starship_engine.apps.etrade_probe.app import (
+        ETradeProbeRunner,
+        build_probe_publisher,
+    )
+    from starship_engine.core.settings import apply_env_overrides, load_engine_settings
 
     cfg_path = Path(os.environ.get("ENGINE_CONFIG_PATH", "configs/bot.yaml"))
-    settings = load_engine_settings(cfg_path)
-    runner = settings.runner.model_dump()
-
-    def _set(field: str, value: object) -> None:
-        if value is None:
-            return
-        runner[field] = value
-
-    _set("signal_mode", signal_mode)
-    _set("context_symbol", context_symbol)
-    _set("context_exchange", context_exchange)
-    _set("context_code", context_code)
-    _set("warmup_bars", warmup_bars)
-    _set("dry_run", dry_run)
-    _set("ignore_time_window", ignore_time_window)
-    _set("require_ema_touch", require_ema_touch)
-    _set("early_alerts_enabled", early_alerts_enabled)
-    _set("early_min_bars", early_min_bars)
-    _set("early_require_calm", early_require_calm)
-    _set("early_require_rv30_le_rv60", early_require_rv30_le_rv60)
-    _set("early_vrp_min", early_vrp_min)
-    _set("early_mr_max", early_mr_max)
-    _set("early_rv60_min", early_rv60_min)
-    _set("early_vov_max", early_vov_max)
-
-    settings.runner = RunnerSettings.model_validate(runner)
-
-    with tempfile.NamedTemporaryFile(
-        prefix="starship-config-", suffix=".yaml", delete=False
-    ) as tmp:
-        tmp.write(
-            yaml.safe_dump(settings.model_dump(), sort_keys=False).encode("utf-8")
-        )
-        os.environ["ENGINE_CONFIG_PATH"] = tmp.name
-    run_main()
+    config_path, settings = _temp_config_with_runner_overrides(
+        etrade_run_once=once,
+        etrade_poll_seconds=poll_seconds,
+        etrade_signal_cooldown_seconds=cooldown_seconds,
+        etrade_option_roots=option_roots,
+    )
+    os.environ["ENGINE_CONFIG_PATH"] = str(config_path)
+    settings = apply_env_overrides(load_engine_settings(config_path), dict(os.environ))
+    setup_logging(
+        level_name=settings.runner.log_level,
+        log_file=settings.runner.log_file,
+        log_daily=settings.runner.log_daily,
+        log_daily_backup_count=settings.runner.log_daily_backup_count,
+    )
+    log = get_logger("starship_engine.cli")
+    runtime = {
+        "mode": "etrade_probe",
+        "once": once,
+        "poll_seconds": poll_seconds,
+        "cooldown_seconds": cooldown_seconds,
+    }
+    runner = ETradeProbeRunner(engine_settings=settings, runtime=runtime, log=log)
+    runner.publisher = build_probe_publisher(
+        engine_settings=settings,
+        direct_slack=direct_slack,
+        publish_web=publish_web,
+        write_jsonl=write_jsonl,
+    )
+    runner.run()
 
 
 @policy_app.command("promote")

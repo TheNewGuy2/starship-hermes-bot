@@ -20,6 +20,30 @@ Run engine (module):
 uv run python -m starship_engine.runner
 ```
 
+Run live E*TRADE SPX probe once and send Slack directly:
+
+```bash
+python -m starship_engine.probe_cli --once --direct-slack --write-jsonl
+```
+
+PowerShell launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_etrade_probe_once.ps1
+```
+
+Run live E*TRADE SPX probe in a loop every 60 seconds:
+
+```bash
+python -m starship_engine.probe_cli --loop --poll-seconds 60 --cooldown-seconds 300 --direct-slack --write-jsonl
+```
+
+PowerShell launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_etrade_probe_loop.ps1
+```
+
 Run web ingest (FastAPI):
 
 ```bash

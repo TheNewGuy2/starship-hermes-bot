@@ -56,3 +56,16 @@ class JsonlPublisher:
         with p.open("a", encoding="utf-8") as f:
             f.write(fact.model_dump_json(exclude_none=True))
             f.write("\n")
+
+
+@dataclass
+class SlackFactPublisher:
+    webhook_url: str | None = None
+
+    def publish(self, fact: EngineFactV1) -> None:
+        from starship_web.slack import format_fact_message, send_slack_message
+
+        payload = format_fact_message(fact.model_dump())
+        ok = send_slack_message(payload, webhook_url=self.webhook_url)
+        if not ok:
+            raise RuntimeError("Slack webhook rejected the fact payload")

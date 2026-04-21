@@ -66,6 +66,10 @@ class RunnerSettings(BaseModel):
     policy_no_new_entries_after_cst: str = "13:45"
     policy_exit_all_by_cst: str = "14:45"
     policy_tp_targets: str = "0.45,0.25,0.25"
+    etrade_poll_seconds: int = 60
+    etrade_signal_cooldown_seconds: int = 300
+    etrade_run_once: bool = False
+    etrade_option_roots: str = "SPX,SPXW,XSP"
     log_level: str = "INFO"
     log_file: str = "logs/starship_engine.log"
     log_daily: bool = False
@@ -103,6 +107,32 @@ def load_engine_settings(path: Path) -> EngineSettings:
 def apply_env_overrides(
     settings: EngineSettings, env: dict[str, str]
 ) -> EngineSettings:
+    def _apply_overrides(
+        payload: dict[str, Any],
+        mapping: dict[str, tuple[str, type]],
+    ) -> dict[str, Any]:
+        out = dict(payload)
+        for env_key, (field, cast) in mapping.items():
+            raw = env.get(env_key)
+            if raw is None or raw.strip() == "":
+                continue
+            text = raw.strip()
+            if cast is bool:
+                out[field] = text.lower() in ("1", "true", "yes", "y", "on")
+            elif cast is int:
+                try:
+                    out[field] = int(text)
+                except ValueError:
+                    continue
+            elif cast is float:
+                try:
+                    out[field] = float(text)
+                except ValueError:
+                    continue
+            else:
+                out[field] = text
+        return out
+
     au = settings.auth.model_dump()
     auth_map: dict[str, tuple[str, type]] = {
         "BROKER_PROVIDER": ("provider", str),
@@ -115,25 +145,37 @@ def apply_env_overrides(
         "ETRADE_OAUTH_TOKEN": ("etrade_oauth_token", str),
         "ETRADE_OAUTH_TOKEN_SECRET": ("etrade_oauth_token_secret", str),
     }
-    for env_key, (field, cast) in auth_map.items():
-        raw = env.get(env_key)
-        if raw is None or raw.strip() == "":
-            continue
-        if cast is bool:
-            au[field] = raw.strip().lower() in ("1", "true", "yes", "y", "on")
-        else:
-            au[field] = raw.strip()
+    au = _apply_overrides(au, auth_map)
+
+    runner = settings.runner.model_dump()
+    runner_map: dict[str, tuple[str, type]] = {
+        "ETRADE_POLL_SECONDS": ("etrade_poll_seconds", int),
+        "ETRADE_SIGNAL_COOLDOWN_SECONDS": ("etrade_signal_cooldown_seconds", int),
+        "ETRADE_RUN_ONCE": ("etrade_run_once", bool),
+        "ETRADE_OPTION_ROOTS": ("etrade_option_roots", str),
+    }
+    runner = _apply_overrides(runner, runner_map)
+
+    comms = settings.comms.model_dump()
+    comms_map: dict[str, tuple[str, type]] = {
+        "ENGINE_INGEST_URL": ("engine_ingest_url", str),
+        "ENGINE_INGEST_SECRET": ("engine_ingest_secret", str),
+        "ENGINE_FACTS_JSONL": ("engine_facts_jsonl", str),
+        "ENGINE_RUN_ID": ("engine_run_id", str),
+    }
+    comms = _apply_overrides(comms, comms_map)
+
     return EngineSettings(
         installed_apps=settings.installed_apps,
         trend_risk=settings.trend_risk,
         sentinel=settings.sentinel,
         captain_log=settings.captain_log,
-        comms=settings.comms,
+        comms=CommsSettings.model_validate(comms),
         exit_planner=settings.exit_planner,
         heston=settings.heston,
         context_overnight=settings.context_overnight,
         auth=AuthSettings.model_validate(au),
         stream=settings.stream,
-        runner=settings.runner,
+        runner=RunnerSettings.model_validate(runner),
         market_persist=settings.market_persist,
     )
