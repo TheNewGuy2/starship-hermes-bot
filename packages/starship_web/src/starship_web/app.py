@@ -15,7 +15,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starship_shared.schemas import EngineFactV1
 from starship_shared.signing import verify_body_v1
 
-from starship_web.config import load_runtime_env
+from starship_web.config import get_logs_dir, load_runtime_env
 from starship_web.slack import (
     format_fact_message,
     get_slack_webhook_url,
@@ -26,6 +26,7 @@ from starship_web.etrade_auth import (
     clear_access_token,
     clear_pending_request_token,
     exchange_access_token,
+    get_session_file_path,
     load_access_token,
     load_consumer_config,
     load_pending_request_token,
@@ -41,12 +42,15 @@ from starship_web.execution_service import (
     get_execution_mode,
     submit_execution_package,
 )
+from starship_web.pine_bridge import get_tradingview_webhook_secret, process_pine_alert
+from starship_web.pine_state_store import clear_pine_states, list_pine_states, load_pine_state
 from starship_web.ticket_audit import (
     append_ticket_audit_event,
+    clear_ticket_audit_logs,
     list_ticket_audit_events,
     load_latest_ticket_audit_event,
 )
-from starship_web.ticket_store import list_tickets, load_ticket, save_ticket
+from starship_web.ticket_store import clear_tickets, list_tickets, load_ticket, save_ticket
 from starship_shared.trade_ticket import TradeTicketV1
 from starship_web.trade_tickets import (
     build_trade_ticket_from_preview,
@@ -64,11 +68,12 @@ app = FastAPI()
 basic_auth = HTTPBasic()
 
 
-def _setup_logging(log_file: str = "logs/web.log") -> logging.Logger:
+def _setup_logging(log_file: str | Path | None = None) -> logging.Logger:
     logger = logging.getLogger("starship_web")
     if logger.handlers:
         return logger
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    log_path = Path(log_file) if log_file else (get_logs_dir() / "web.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter(
         fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -78,9 +83,7 @@ def _setup_logging(log_file: str = "logs/web.log") -> logging.Logger:
     sh.setLevel(logging.INFO)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
-    fh = RotatingFileHandler(
-        log_file, maxBytes=5_000_000, backupCount=5
-    )
+    fh = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=5)
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
@@ -111,6 +114,33 @@ def _load_engine_ingest_secret() -> str:
 
 def _default_account_id_key() -> str:
     return os.environ.get("ETRADE_DEFAULT_ACCOUNT_ID_KEY", "").strip()
+
+
+def _remap_signal_ticket_account_if_needed(ticket: TradeTicketV1) -> tuple[TradeTicketV1, bool]:
+    current_default = _default_account_id_key()
+    if not current_default:
+        return ticket, False
+    if ticket.source != "signal":
+        return ticket, False
+    if ticket.broker.account_id_key == current_default:
+        return ticket, False
+
+    warning = (
+        "Signal ticket account key was remapped to the current "
+        "ETRADE_DEFAULT_ACCOUNT_ID_KEY before preview."
+    )
+    warnings = [w for w in ticket.warnings if w != warning]
+    warnings.append(warning)
+    updated = ticket.model_copy(
+        update={
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "broker": ticket.broker.model_copy(
+                update={"account_id_key": current_default}
+            ),
+            "warnings": warnings[-25:],
+        }
+    )
+    return updated, True
 
 
 def _admin_username() -> str:
@@ -363,6 +393,7 @@ def _audit_ticket(
 
 def _build_ops_snapshot() -> dict[str, object]:
     tickets = list_tickets()
+    pine_states = list_pine_states()
     latest_ticket = tickets[0] if tickets else None
     status_counts: dict[str, int] = {}
     live_execute_ready_count = 0
@@ -436,6 +467,26 @@ def _build_ops_snapshot() -> dict[str, object]:
                 else None
             ),
         },
+        "pine_bridge": {
+            "configured": bool(get_tradingview_webhook_secret()),
+            "state_count": len(pine_states),
+            "latest": (
+                pine_states[0].model_dump()
+                if pine_states
+                else None
+            ),
+        },
+    }
+
+
+def _clear_ticket_runtime_state(*, include_pine_states: bool = False) -> dict[str, int]:
+    ticket_count = clear_tickets()
+    audit_count = clear_ticket_audit_logs()
+    pine_count = clear_pine_states() if include_pine_states else 0
+    return {
+        "tickets": ticket_count,
+        "audit_logs": audit_count,
+        "pine_states": pine_count,
     }
 
 
@@ -954,10 +1005,12 @@ def _render_etrade_console(
       display: grid;
       gap: 10px;
     }}
+    {_app_nav_styles()}
   </style>
 </head>
 <body>
   <main>
+    {_render_app_nav("etrade")}
     <h1>Starship E*TRADE Console</h1>
     <p class="lead">This console is the safe bridge between your signal engine and future execution UI. For now it only handles connection checks, account reads, and preview-only order requests.</p>
     {f'<div class="message">{escape(message)}</div>' if message else ''}
@@ -1021,6 +1074,479 @@ def _render_etrade_console(
     {f'<section class="panel" style="margin-top:18px;"><h2>Accounts Response</h2><pre>{escape(_pretty_json(accounts_payload))}</pre></section>' if accounts_payload else ''}
     {f'<section class="panel" style="margin-top:18px;"><h2>Balance Response</h2><pre>{escape(_pretty_json(balance_payload))}</pre></section>' if balance_payload else ''}
     {f'<section class="panel" style="margin-top:18px;"><h2>Preview Response</h2><pre>{escape(_pretty_json(preview_payload))}</pre></section>' if preview_payload else ''}
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(body)
+
+
+def _app_nav_styles() -> str:
+    return """
+    .app-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 22px;
+      padding: 14px 16px;
+      background: rgba(255, 250, 241, 0.88);
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      box-shadow: 0 10px 24px rgba(63, 46, 25, 0.06);
+      backdrop-filter: blur(10px);
+    }
+    .app-nav a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      padding: 0 14px;
+      border-radius: 999px;
+      text-decoration: none;
+      color: #8b5e34;
+      background: rgba(139, 94, 52, 0.08);
+      border: 1px solid transparent;
+      font-weight: 600;
+    }
+    .app-nav a:hover {
+      border-color: #d8c9aa;
+      background: rgba(15, 118, 110, 0.10);
+      color: #0f766e;
+    }
+    .app-nav a.active {
+      background: #0f766e;
+      color: white;
+      border-color: #0f766e;
+    }
+    """
+
+
+def _render_app_nav(active: str = "") -> str:
+    links = [
+        ("/", "Home", "home"),
+        ("/broker/etrade", "E*TRADE", "etrade"),
+        ("/tickets", "Tickets", "tickets"),
+        ("/pine-bridge", "Pine Bridge", "pine"),
+        ("/ops/status", "Ops", "ops"),
+    ]
+    items = []
+    for href, label, key in links:
+        active_class = "active" if active == key else ""
+        items.append(
+            f'<a class="{active_class}" href="{escape(href)}">{escape(label)}</a>'
+        )
+    return f'<nav class="app-nav">{"".join(items)}</nav>'
+
+
+def _render_home(snapshot: dict[str, object]) -> HTMLResponse:
+    broker_info = snapshot.get("broker", {}) if isinstance(snapshot, dict) else {}
+    tickets_info = snapshot.get("tickets", {}) if isinstance(snapshot, dict) else {}
+    pine_info = snapshot.get("pine_bridge", {}) if isinstance(snapshot, dict) else {}
+    latest_ticket = (
+        tickets_info.get("latest", {}) if isinstance(tickets_info, dict) else {}
+    )
+    latest_pine = pine_info.get("latest", {}) if isinstance(pine_info, dict) else {}
+    latest_pine_close_text = "n/a"
+    if isinstance(latest_pine, dict):
+        pine_events = latest_pine.get("event_log")
+        if isinstance(pine_events, list):
+            close_events = [
+                event
+                for event in pine_events
+                if isinstance(event, dict)
+                and str(event.get("event_type") or "").upper() == "CLOSE"
+            ]
+            if close_events:
+                latest_close = close_events[-1]
+                latest_pine_close_text = (
+                    f"{_bridge_event_reason(latest_close)} at "
+                    f"{latest_close.get('processed_at') or latest_close.get('bar_time') or 'n/a'}"
+                )
+
+    cards = [
+        {
+            "title": "E*TRADE Console",
+            "href": "/broker/etrade",
+            "body": (
+                "Check connection health, pull accounts, and submit preview-only "
+                "broker requests."
+            ),
+            "meta": (
+                f"Connected: {broker_info.get('connected')} | "
+                f"Mode: {broker_info.get('execution_mode') or 'n/a'}"
+            ),
+        },
+        {
+            "title": "Ticket Queue",
+            "href": "/tickets",
+            "body": (
+                "Review all preview tickets, execution readiness, and per-trade "
+                "details in one place."
+            ),
+            "meta": (
+                f"Tickets: {tickets_info.get('count', 0)} | "
+                f"Live-ready: {tickets_info.get('live_execute_ready_count', 0)}"
+            ),
+        },
+        {
+            "title": "Pine Bridge",
+            "href": "/pine-bridge",
+            "body": (
+                "Inspect TradingView/Pine webhook state, linked tickets, and the "
+                "latest live mark snapshots."
+            ),
+            "meta": (
+                f"Configured: {pine_info.get('configured')} | "
+                f"States: {pine_info.get('state_count', 0)}"
+            ),
+        },
+        {
+            "title": "Ops Status",
+            "href": "/ops/status",
+            "body": (
+                "Open the authenticated deployment snapshot for web, broker, Slack, "
+                "engine handoff, and ticket state."
+            ),
+            "meta": "Protected with basic auth.",
+        },
+    ]
+
+    card_html = "".join(
+        f"""
+        <a class="card" href="{escape(str(card['href']))}">
+          <h2>{escape(str(card['title']))}</h2>
+          <p>{escape(str(card['body']))}</p>
+          <span>{escape(str(card['meta']))}</span>
+        </a>
+        """
+        for card in cards
+    )
+
+    latest_ticket_html = (
+        f"""
+        <section class="panel">
+          <h2>Latest Ticket</h2>
+          <p><strong>ID:</strong> <a href="/tickets/{escape(str(latest_ticket.get('ticket_id') or ''))}">{escape(str(latest_ticket.get('ticket_id') or 'n/a'))}</a></p>
+          <p><strong>Underlier:</strong> {escape(str(latest_ticket.get('underlier') or 'n/a'))}</p>
+          <p><strong>Status:</strong> {escape(str(latest_ticket.get('status') or 'n/a'))}</p>
+          <p><strong>Updated:</strong> {escape(str(latest_ticket.get('updated_at') or 'n/a'))}</p>
+        </section>
+        """
+        if latest_ticket
+        else """
+        <section class="panel">
+          <h2>Latest Ticket</h2>
+          <p>No tickets yet.</p>
+        </section>
+        """
+    )
+
+    latest_pine_html = (
+        f"""
+        <section class="panel">
+          <h2>Latest Pine State</h2>
+          <p><strong>State:</strong> <a href="/pine-bridge/states/{escape(str(latest_pine.get('state_id') or ''))}">{escape(str(latest_pine.get('state_id') or 'n/a'))}</a></p>
+          <p><strong>Strategy:</strong> {escape(str(latest_pine.get('strategy_name') or 'n/a'))}</p>
+          <p><strong>Status:</strong> {escape(str(latest_pine.get('status') or 'n/a'))}</p>
+          <p><strong>Last Event:</strong> {escape(str(latest_pine.get('last_event_type') or 'n/a'))}</p>
+          <p><strong>Last Close:</strong> {escape(latest_pine_close_text)}</p>
+        </section>
+        """
+        if latest_pine
+        else """
+        <section class="panel">
+          <h2>Latest Pine State</h2>
+          <p>No Pine bridge states yet.</p>
+        </section>
+        """
+    )
+
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Starship Home</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 35%),
+        linear-gradient(180deg, #f7f3ea 0%, #efe6d5 100%);
+      color: #1f2933;
+    }}
+    main {{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }}
+    h1, h2 {{
+      margin-top: 0;
+      font-family: Georgia, "Times New Roman", serif;
+    }}
+    .lead {{
+      max-width: 72ch;
+      margin-bottom: 24px;
+      color: #5b6572;
+    }}
+    .card-grid, .panel-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 16px;
+    }}
+    .card, .panel {{
+      background: #fffaf1;
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 12px 30px rgba(63, 46, 25, 0.08);
+    }}
+    .card {{
+      text-decoration: none;
+      color: inherit;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }}
+    .card:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 16px 34px rgba(63, 46, 25, 0.12);
+    }}
+    .card p {{
+      color: #5b6572;
+      line-height: 1.5;
+    }}
+    .card span {{
+      display: block;
+      margin-top: 12px;
+      color: #8b5e34;
+      font-weight: 600;
+    }}
+    a {{
+      color: #8b5e34;
+    }}
+    {_app_nav_styles()}
+  </style>
+</head>
+<body>
+  <main>
+    {_render_app_nav("home")}
+    <h1>Starship Console</h1>
+    <p class="lead">This landing page gives you one place to jump between broker connection, preview tickets, Pine bridge state, and ops status while you are testing the TradingView to E*TRADE flow.</p>
+    <section class="card-grid">
+      {card_html}
+    </section>
+    <section class="panel-grid" style="margin-top:18px;">
+      {latest_ticket_html}
+      {latest_pine_html}
+    </section>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(body)
+
+
+def _bridge_event_reason(event: dict[str, object]) -> str:
+    event_id = str(event.get("event_id") or "").strip()
+    parts = event_id.split("|")
+    if len(parts) >= 2 and parts[1]:
+        return parts[1]
+    return event_id or "n/a"
+
+
+def _latest_bridge_event(state: object, event_type: str) -> dict[str, object] | None:
+    target = event_type.upper()
+    events = [
+        event
+        for event in getattr(state, "event_log", [])
+        if str(event.get("event_type") or "").upper() == target
+    ]
+    return events[-1] if events else None
+
+
+def _render_bridge_event_timeline(state: object, *, limit: int = 10) -> str:
+    events = list(getattr(state, "event_log", []) or [])[-limit:]
+    if not events:
+        return "<p>No Pine events recorded yet.</p>"
+
+    rows = []
+    for event in reversed(events):
+        event_type = str(event.get("event_type") or "n/a").upper()
+        css_event = event_type.lower()
+        reason = _bridge_event_reason(event)
+        processed = str(event.get("processed_at") or "n/a")
+        bar_time = str(event.get("bar_time") or "n/a")
+        event_id = str(event.get("event_id") or "n/a")
+        rows.append(
+            f"""
+            <tr class="event-{escape(css_event)}">
+              <td class="event-type">{escape(event_type)}</td>
+              <td>{escape(reason)}</td>
+              <td>{escape(processed)}</td>
+              <td>{escape(bar_time)}</td>
+              <td><code>{escape(event_id)}</code></td>
+            </tr>
+            """
+        )
+
+    return f"""
+    <table class="event-table">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Reason</th>
+          <th>Processed</th>
+          <th>Bar Time</th>
+          <th>Event ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    """
+
+
+def _render_pine_bridge_overview() -> HTMLResponse:
+    states = list_pine_states()
+    state_cards = []
+    for state in states:
+        entry_ticket = load_ticket(state.entry_ticket_id) if state.entry_ticket_id else None
+        close_ticket = load_ticket(state.close_ticket_id) if state.close_ticket_id else None
+        live_mark = state.latest_live_mark or {}
+        live_pnl = live_mark.get("estimated_pnl")
+        pnl_text = "n/a" if live_pnl is None else str(live_pnl)
+        latest_close = _latest_bridge_event(state, "CLOSE")
+        latest_close_text = "n/a"
+        if latest_close:
+            latest_close_text = (
+                f"{_bridge_event_reason(latest_close)} at "
+                f"{latest_close.get('processed_at') or latest_close.get('bar_time') or 'n/a'}"
+            )
+        state_cards.append(
+            f"""
+            <article class="panel">
+              <h2>{escape(state.underlier)} <span>{escape(state.status)}</span></h2>
+              <p><strong>State ID:</strong> <a href="/pine-bridge/states/{escape(state.state_id)}">{escape(state.state_id)}</a></p>
+              <p><strong>Strategy:</strong> {escape(state.strategy_name)}</p>
+              <p><strong>Position Key:</strong> {escape(state.position_key)}</p>
+              <p><strong>Active:</strong> {escape(str(state.active))}</p>
+              <p><strong>Last Event:</strong> {escape(str(state.last_event_type or 'n/a'))}</p>
+              <p><strong>Last Close:</strong> {escape(latest_close_text)}</p>
+              <p><strong>Updated:</strong> {escape(state.updated_at)}</p>
+              <p><strong>Live P/L:</strong> {escape(pnl_text)}</p>
+              <p><strong>Entry Ticket:</strong> {f'<a href="/tickets/{escape(state.entry_ticket_id)}">{escape(state.entry_ticket_id)}</a>' if entry_ticket else escape(str(state.entry_ticket_id or 'n/a'))}</p>
+              <p><strong>Close Ticket:</strong> {f'<a href="/tickets/{escape(state.close_ticket_id)}">{escape(state.close_ticket_id)}</a>' if close_ticket else escape(str(state.close_ticket_id or 'n/a'))}</p>
+              <details open>
+                <summary>Recent Pine Events</summary>
+                {_render_bridge_event_timeline(state)}
+              </details>
+              <details>
+                <summary>Latest Aux</summary>
+                <pre>{escape(_pretty_json(state.latest_aux))}</pre>
+              </details>
+              <details>
+                <summary>Latest Live Mark</summary>
+                <pre>{escape(_pretty_json(state.latest_live_mark))}</pre>
+              </details>
+            </article>
+            """
+        )
+
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pine Bridge Overview</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: linear-gradient(180deg, #f7f3ea 0%, #efe6d5 100%);
+      color: #1f2933;
+    }}
+    main {{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }}
+    .panel {{
+      background: #fffaf1;
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 12px 30px rgba(63, 46, 25, 0.08);
+    }}
+    h1, h2 {{
+      font-family: Georgia, "Times New Roman", serif;
+      margin-top: 0;
+    }}
+    h2 span {{
+      font-size: 14px;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: #8b5e34;
+      margin-left: 8px;
+      text-transform: uppercase;
+    }}
+    pre {{
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f8f4ec;
+      border: 1px solid #d8c9aa;
+      border-radius: 12px;
+      padding: 12px;
+    }}
+    code {{
+      color: #4b5563;
+      font-size: 12px;
+    }}
+    .event-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 13px;
+    }}
+    .event-table th,
+    .event-table td {{
+      border-top: 1px solid #eadfca;
+      padding: 7px 6px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    .event-table th {{
+      color: #6f5634;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .event-type {{
+      font-weight: 700;
+    }}
+    .event-entry .event-type {{
+      color: #0f766e;
+    }}
+    .event-manage .event-type {{
+      color: #8b5e34;
+    }}
+    .event-close .event-type {{
+      color: #b91c1c;
+    }}
+    a {{
+      color: #8b5e34;
+    }}
+    {_app_nav_styles()}
+  </style>
+</head>
+<body>
+  <main>
+    {_render_app_nav("pine")}
+    <h1>Pine Bridge</h1>
+    <p>This view tracks TradingView/Pine state objects, linked entry and close tickets, and the latest live mark data gathered on the Python side.</p>
+    <div class="grid">
+      {''.join(state_cards) or '<section class="panel"><h2>No Pine states yet</h2><p>Once TradingView sends ENTRY or MANAGE alerts, they will show up here.</p></section>'}
+    </div>
   </main>
 </body>
 </html>"""
@@ -1094,13 +1620,15 @@ def _render_ops_status(
       color: #8b5e34;
       font-weight: 600;
     }}
+    {_app_nav_styles()}
   </style>
 </head>
 <body>
   <main>
+    {_render_app_nav("ops")}
     <h1>Ops Status</h1>
     <p>Authenticated as <strong>{escape(viewer)}</strong>. This page is the safe deployment-health view for web, broker, Slack, and engine handoff.</p>
-    <p><a href="/tickets">Back to Queue</a> | <a href="/broker/etrade">Open E*TRADE Console</a> | <a href="/ops/status.json">Open JSON</a></p>
+    <p><a href="/ops/status.json">Open JSON Snapshot</a></p>
     <div class="grid">
       <section class="panel">
         <h2>Web Runtime</h2>
@@ -1234,6 +1762,23 @@ def _render_ticket_queue(
             """
         )
 
+    maintenance_html = """
+    <section class="maintenance">
+      <div class="maintenance-copy">
+        <h2>Queue Maintenance</h2>
+        <p>Use these when stale ticket data is getting in the way. The first action clears the ticket queue and audit logs. The second also clears Pine bridge states for a full fresh start.</p>
+      </div>
+      <div class="maintenance-actions">
+        <form method="post" action="/tickets/clear-all">
+          <button type="submit" class="alt">Clear Tickets + Audit Logs</button>
+        </form>
+        <form method="post" action="/tickets/reset-day">
+          <button type="submit" class="danger">Clear Tickets + Audit + Pine States</button>
+        </form>
+      </div>
+    </section>
+    """
+
     body = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1310,6 +1855,12 @@ def _render_ticket_queue(
       border-radius: 10px;
       cursor: pointer;
     }}
+    button.alt {{
+      background: #8b5e34;
+    }}
+    button.danger {{
+      background: #a11d33;
+    }}
     a {{
       color: #8b5e34;
     }}
@@ -1321,15 +1872,44 @@ def _render_ticket_queue(
       border-radius: 12px;
       padding: 12px;
     }}
+    .maintenance {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0 0 18px;
+      padding: 18px;
+      background: #fffaf1;
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      box-shadow: 0 12px 30px rgba(63, 46, 25, 0.08);
+    }}
+    .maintenance h2 {{
+      margin: 0 0 8px;
+      font-family: Georgia, "Times New Roman", serif;
+    }}
+    .maintenance p {{
+      margin: 0;
+      max-width: 70ch;
+      color: #5b6572;
+    }}
+    .maintenance-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    {_app_nav_styles()}
   </style>
 </head>
 <body>
   <main>
+    {_render_app_nav("tickets")}
     <h1>Trade Ticket Queue</h1>
     <p>This queue is the canonical review surface for manual and signal-driven trade tickets.</p>
     {f'<div class="message">{escape(message)}</div>' if message else ''}
     {f'<div class="message error">{escape(error)}</div>' if error else ''}
-    <p><a href="/broker/etrade">Open E*TRADE Console</a> | <a href="/ops/status">Open Ops Status</a></p>
+    {maintenance_html}
     <div class="grid">
       {''.join(cards) or '<p>No tickets yet.</p>'}
     </div>
@@ -1606,12 +2186,14 @@ def _render_ticket_detail(
     a {{
       color: #8b5e34;
     }}
+    {_app_nav_styles()}
   </style>
 </head>
 <body>
   <main>
+    {_render_app_nav("tickets")}
     <h1>{escape(ticket.underlier)} Ticket</h1>
-    <p><a href="/tickets">Back to Queue</a> | <a href="/tickets/{escape(ticket.ticket_id)}.json">Open JSON</a> | <a href="/ops/status">Open Ops Status</a></p>
+    <p><a href="/tickets/{escape(ticket.ticket_id)}.json">Open Ticket JSON</a></p>
     {f'<div class="message">{escape(message)}</div>' if message else ''}
     {f'<div class="message error">{escape(error)}</div>' if error else ''}
     {sandbox_banner}
@@ -1737,6 +2319,17 @@ def _retry_preview_for_ticket(ticket_id: str):
     ticket = load_ticket(ticket_id)
     if ticket is None:
         raise RuntimeError(f"Ticket not found: {ticket_id}")
+    ticket, remapped_account = _remap_signal_ticket_account_if_needed(ticket)
+    if remapped_account:
+        save_ticket(ticket)
+        _audit_ticket(
+            ticket,
+            category="ticket",
+            action="remap_account",
+            summary="Signal ticket account key remapped to the current default before retry preview.",
+            actor="system",
+            details={"account_id_key": ticket.broker.account_id_key},
+        )
     if not ticket.broker.account_id_key:
         raise RuntimeError("Ticket has no broker account id key")
     if not ticket.preview_request:
@@ -1825,6 +2418,17 @@ def _prepare_preview_for_ticket(
     ticket = load_ticket(ticket_id)
     if ticket is None:
         raise RuntimeError(f"Ticket not found: {ticket_id}")
+    ticket, remapped_account = _remap_signal_ticket_account_if_needed(ticket)
+    if remapped_account:
+        save_ticket(ticket)
+        _audit_ticket(
+            ticket,
+            category="ticket",
+            action="remap_account",
+            summary="Signal ticket account key remapped to the current default before preparing preview.",
+            actor="system",
+            details={"account_id_key": ticket.broker.account_id_key},
+        )
     prepared = prepare_ticket_for_preview(
         ticket,
         expiry_year=expiry_year,
@@ -1999,6 +2603,11 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/", response_class=HTMLResponse)
+async def home() -> HTMLResponse:
+    return _render_home(_build_ops_snapshot())
+
+
 @app.get("/ops/status", response_class=HTMLResponse)
 async def ops_status(viewer: str = Depends(_require_admin)) -> HTMLResponse:
     return _render_ops_status(_build_ops_snapshot(), viewer=viewer)
@@ -2017,6 +2626,41 @@ async def etrade_console() -> HTMLResponse:
 @app.get("/tickets", response_class=HTMLResponse)
 async def ticket_queue() -> HTMLResponse:
     return _render_ticket_queue()
+
+
+@app.post("/tickets/clear-all", response_class=HTMLResponse)
+async def clear_all_tickets() -> HTMLResponse:
+    try:
+        counts = _clear_ticket_runtime_state(include_pine_states=False)
+        return _render_ticket_queue(
+            message=(
+                "Cleared "
+                f"{counts['tickets']} tickets and {counts['audit_logs']} audit logs."
+            )
+        )
+    except Exception as exc:
+        log.exception("ticket clear-all failed")
+        return _render_ticket_queue(
+            error=f"Failed to clear ticket queue: {exc}",
+        )
+
+
+@app.post("/tickets/reset-day", response_class=HTMLResponse)
+async def reset_ticket_day() -> HTMLResponse:
+    try:
+        counts = _clear_ticket_runtime_state(include_pine_states=True)
+        return _render_ticket_queue(
+            message=(
+                "Reset runtime state. Cleared "
+                f"{counts['tickets']} tickets, {counts['audit_logs']} audit logs, "
+                f"and {counts['pine_states']} Pine bridge states."
+            )
+        )
+    except Exception as exc:
+        log.exception("ticket reset-day failed")
+        return _render_ticket_queue(
+            error=f"Failed to reset runtime state: {exc}",
+        )
 
 
 @app.get("/tickets/{ticket_id}")
@@ -2128,7 +2772,7 @@ async def etrade_status() -> dict[str, object]:
         "ok": True,
         "connected": token is not None,
         "pending_request_token": pending is not None,
-        "token_path": "data/etrade_session.json",
+        "token_path": str(get_session_file_path()),
         "environment": api_config.environment,
         "base_url": api_config.base_url,
         "token_status": token_status,
@@ -2179,7 +2823,7 @@ async def etrade_callback(oauth_verifier: str | None = None) -> dict[str, object
         return {
             "ok": True,
             "message": "E*TRADE access token stored",
-            "token_path": "data/etrade_session.json",
+            "token_path": str(get_session_file_path()),
         }
     except Exception as exc:
         log.exception("etrade callback failed")
@@ -2635,6 +3279,97 @@ async def engine_ingest(
             log.info("signal ticket skipped: ETRADE_DEFAULT_ACCOUNT_ID_KEY not set")
 
     return {"ok": True, "run_id": fact.run_id, "seq": fact.seq}
+
+
+@app.post("/webhooks/tradingview")
+async def tradingview_webhook(request: Request) -> JSONResponse:
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "TradingView webhook body is empty.")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(400, f"TradingView webhook must be valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "TradingView webhook payload must be a JSON object.")
+
+    # Hermes can still emit its legacy JSON alerts alongside the bridge payloads.
+    # Those legacy payloads are useful for human monitoring but they do not match
+    # the Pine bridge schema, so we acknowledge and skip them here instead of
+    # returning an error to TradingView.
+    if (
+        "tag" in payload
+        and "strategy_name" not in payload
+        and "position_key" not in payload
+    ):
+        return JSONResponse(
+            {
+                "ok": True,
+                "skipped": True,
+                "reason": "non_bridge_hermes_payload",
+                "event": payload.get("event"),
+                "tag": payload.get("tag"),
+            }
+        )
+
+    try:
+        result = process_pine_alert(payload)
+    except Exception as exc:
+        log.exception("tradingview webhook failed")
+        message = str(exc)
+        lowered = message.lower()
+        status_code = 500
+        if "secret mismatch" in lowered:
+            status_code = 401
+        elif (
+            "missing" in lowered
+            or "must be" in lowered
+            or "unsupported" in lowered
+            or "no active entry ticket" in lowered
+        ):
+            status_code = 400
+        raise HTTPException(status_code, f"TradingView webhook failed: {message}") from exc
+
+    state = result.get("state")
+    if isinstance(state, dict):
+        log.info(
+            "tradingview webhook ok strategy=%s event=%s state_id=%s duplicate=%s",
+            state.get("strategy_name"),
+            state.get("last_event_type"),
+            state.get("state_id"),
+            bool(result.get("duplicate")),
+        )
+    return JSONResponse(result)
+
+
+@app.get("/pine-bridge/states")
+async def pine_bridge_states() -> dict[str, object]:
+    states = list_pine_states()
+    return {
+        "ok": True,
+        "count": len(states),
+        "states": [state.model_dump() for state in states],
+    }
+
+
+@app.get("/pine-bridge", response_class=HTMLResponse)
+async def pine_bridge_overview() -> HTMLResponse:
+    return _render_pine_bridge_overview()
+
+
+@app.get("/pine-bridge/states/{state_id}")
+async def pine_bridge_state_detail(state_id: str) -> dict[str, object]:
+    state = load_pine_state(state_id)
+    if state is None:
+        raise HTTPException(404, f"Pine bridge state not found: {state_id}")
+    entry_ticket = load_ticket(state.entry_ticket_id) if state.entry_ticket_id else None
+    close_ticket = load_ticket(state.close_ticket_id) if state.close_ticket_id else None
+    return {
+        "ok": True,
+        "state": state.model_dump(),
+        "entry_ticket": entry_ticket.model_dump() if entry_ticket else None,
+        "close_ticket": close_ticket.model_dump() if close_ticket else None,
+    }
 
 
 @app.post("/slack/events")

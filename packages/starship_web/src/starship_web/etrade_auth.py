@@ -8,7 +8,7 @@ from pathlib import Path
 
 from requests_oauthlib import OAuth1Session
 
-from starship_web.config import load_runtime_env
+from starship_web.config import get_data_dir, load_runtime_env
 
 
 _dotenv_path, _secrets_dir = load_runtime_env()
@@ -42,9 +42,7 @@ class ETradeAccessToken:
 
 
 def _data_dir() -> Path:
-    path = Path(os.environ.get("STARSHIP_DATA_DIR", "data"))
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return get_data_dir()
 
 
 def _session_file() -> Path:
@@ -53,6 +51,10 @@ def _session_file() -> Path:
 
 def _pending_request_file() -> Path:
     return _data_dir() / "etrade_request_token.json"
+
+
+def get_session_file_path() -> Path:
+    return _session_file()
 
 
 def load_consumer_config() -> ETradeConsumerConfig:

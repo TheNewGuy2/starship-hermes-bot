@@ -50,6 +50,36 @@ Run web ingest (FastAPI):
 uv run uvicorn starship_web.app:app --host 127.0.0.1 --port 8000
 ```
 
+TradingView/Pine bridge docs:
+
+```text
+docs/tradingview-bridge.md
+```
+
+TradingView/Pine bridge smoke test:
+
+```text
+scripts/send_pine_bridge_alert.ps1
+```
+
+Start a temporary HTTPS tunnel to the local web app:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_cloudflared_tunnel.ps1
+```
+
+Hermes-specific Pine patch guide:
+
+```text
+docs/hermes-pine-bridge-patch.md
+```
+
+Hermes copy/paste patch guide:
+
+```text
+docs/hermes-pine-bridge-copy-paste.md
+```
+
 ## Reporting
 
 Generate a report from state logs:

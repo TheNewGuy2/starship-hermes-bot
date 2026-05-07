@@ -1,0 +1,73 @@
+name: Deploy Stable Web to GCP
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-gcp-web-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ secrets.GCP_ZONE }}
+      GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
+      GCP_VM_APP_DIR: ${{ secrets.GCP_VM_APP_DIR }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Validate deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in \
+            GCP_PROJECT_ID \
+            GCP_ZONE \
+            GCP_INSTANCE
+          do
+            if [[ -z "${!key:-}" ]]; then
+              echo "Missing required secret: ${key}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Deploy starship-web on the stable VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_DIR="${GCP_VM_APP_DIR:-/opt/starship-alpha/app}"
+          REMOTE_CMD="cd '${APP_DIR}' && git fetch origin && git checkout main && git pull --ff-only origin main && bash deploy/gcp/deploy-web-vm.sh"
+          gcloud compute ssh "${GCP_INSTANCE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --zone "${GCP_ZONE}" \
+            --quiet \
+            --command "${REMOTE_CMD}"

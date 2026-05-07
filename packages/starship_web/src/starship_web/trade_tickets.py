@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -49,6 +50,11 @@ def _friendly_status_reason_from_error(error_message: str) -> str:
             "E*TRADE sandbox preview service is temporarily unavailable. "
             "Your ticket is still valid; retry later."
         )
+    if '"code":2040' in lower or "price you specified for this order is invalid" in lower:
+        return (
+            "E*TRADE rejected the order price increment. Rebuild the preview request "
+            "to snap the net price to a valid option increment, then retry."
+        )
     if '"code":4' in lower or "price type you specified" in lower:
         return (
             "E*TRADE rejected the order format. The ticket needs payload adjustment "
@@ -71,6 +77,111 @@ def _infer_order_type(strategy: str | None, legs_count: int) -> str:
     if legs_count > 1:
         return "SPREADS"
     return "OPTN"
+
+
+def _leg_role(leg: TradeTicketLeg) -> tuple[str, str] | None:
+    cp = (leg.call_put or "").strip().upper()
+    action = (leg.order_action or "").strip().upper()
+    if cp not in {"PUT", "CALL"}:
+        return None
+    if action in {"SELL_OPEN", "BUY_CLOSE", "SELL_TO_OPEN", "BUY_TO_CLOSE"}:
+        return cp, "SHORT"
+    if action in {"BUY_OPEN", "SELL_CLOSE", "BUY_TO_OPEN", "SELL_TO_CLOSE"}:
+        return cp, "LONG"
+    return None
+
+
+def _resolve_spread_order_type(ticket: TradeTicketV1) -> str:
+    fallback = ticket.broker.order_type or _infer_order_type(ticket.strategy, len(ticket.legs))
+    if len(ticket.legs) != 4:
+        return fallback
+
+    by_role: dict[tuple[str, str], TradeTicketLeg] = {}
+    for leg in ticket.legs:
+        role = _leg_role(leg)
+        if role is None:
+            return fallback
+        by_role[role] = leg
+
+    required_roles = {
+        ("PUT", "SHORT"),
+        ("PUT", "LONG"),
+        ("CALL", "SHORT"),
+        ("CALL", "LONG"),
+    }
+    if set(by_role) != required_roles:
+        return fallback
+
+    short_put = by_role[("PUT", "SHORT")].strike_price
+    long_put = by_role[("PUT", "LONG")].strike_price
+    short_call = by_role[("CALL", "SHORT")].strike_price
+    long_call = by_role[("CALL", "LONG")].strike_price
+    if None in {short_put, long_put, short_call, long_call}:
+        return fallback
+
+    # Canonical condor geometry:
+    # long_put < short_put < short_call < long_call
+    if not (long_put < short_put < short_call < long_call):
+        return "SPREADS"
+
+    put_width = round(short_put - long_put, 6)
+    call_width = round(long_call - short_call, 6)
+    if put_width <= 0 or call_width <= 0:
+        return "SPREADS"
+
+    if abs(put_width - call_width) < 1e-6:
+        return "IRON_CONDOR"
+    return "SPREADS"
+
+
+def _price_increment_for_ticket(ticket: TradeTicketV1, *, price_type: str) -> float:
+    normalized_price_type = (price_type or "").strip().upper()
+    if normalized_price_type not in {"NET_CREDIT", "NET_DEBIT"}:
+        return 0.01
+
+    roots: set[str] = set()
+    if ticket.underlier:
+        roots.add(ticket.underlier.strip().upper())
+    for leg in ticket.legs:
+        if leg.symbol:
+            roots.add(leg.symbol.strip().upper())
+        option_root = str(leg.broker_payload.get("option_root_symbol", "")).strip().upper()
+        if option_root:
+            roots.add(option_root)
+
+    order_type = (ticket.broker.order_type or "").strip().upper()
+    if roots.intersection({"SPX", "SPXW"}) and order_type in {"IRON_CONDOR", "SPREADS"}:
+        return 0.05
+    return 0.01
+
+
+def normalize_preview_limit_price(
+    ticket: TradeTicketV1,
+    *,
+    price_type: str,
+    limit_price: float,
+) -> tuple[float, str | None]:
+    increment = _price_increment_for_ticket(ticket, price_type=price_type)
+    raw = Decimal(str(limit_price))
+    step = Decimal(str(increment))
+    snapped = (raw / step).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * step
+    if raw > 0:
+        snapped = max(step, snapped)
+    normalized = float(snapped.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    if abs(normalized - limit_price) < 1e-9:
+        return normalized, None
+
+    if increment == 0.05:
+        warning = (
+            f"Preview limit price adjusted from {limit_price:.4f} to {normalized:.2f} "
+            "to satisfy SPX/SPXW complex-order $0.05 net price increments."
+        )
+    else:
+        warning = (
+            f"Preview limit price adjusted from {limit_price:.4f} to {normalized:.2f} "
+            f"to satisfy broker price increments of ${increment:.2f}."
+        )
+    return normalized, warning
 
 
 def _broker_symbol_candidates(underlier: str) -> list[str]:
@@ -327,11 +438,18 @@ def prepare_ticket_for_preview(
     quantity: int,
     limit_price: float,
     client_order_id: str | None = None,
+    price_type: str = "NET_CREDIT",
+    note: str = "Prepared from ticket detail form.",
 ) -> TradeTicketV1:
     now = _utc_now_iso()
+    normalized_limit_price, increment_warning = normalize_preview_limit_price(
+        ticket,
+        price_type=price_type,
+        limit_price=limit_price,
+    )
     prepared_legs: list[TradeTicketLeg] = []
     instruments: list[dict[str, Any]] = []
-    order_type = _infer_order_type(ticket.strategy, len(ticket.legs))
+    order_type = _resolve_spread_order_type(ticket)
 
     for index, leg in enumerate(ticket.legs, start=1):
         call_put = leg.call_put
@@ -341,6 +459,11 @@ def prepare_ticket_for_preview(
                 call_put = "PUT"
             else:
                 call_put = "CALL"
+
+        product_symbol = str(
+            leg.broker_payload.get("option_root_symbol")
+            or leg.symbol
+        ).strip()
 
         prepared_leg = leg.model_copy(
             update={
@@ -355,7 +478,7 @@ def prepare_ticket_for_preview(
         instruments.append(
             {
                 "Product": {
-                    "symbol": prepared_leg.symbol,
+                    "symbol": product_symbol,
                     "securityType": prepared_leg.security_type,
                     "callPut": prepared_leg.call_put,
                     "expiryYear": prepared_leg.expiry_year,
@@ -380,10 +503,10 @@ def prepare_ticket_for_preview(
             "Order": [
                 {
                     "allOrNone": False,
-                    "priceType": "NET_CREDIT",
+                    "priceType": price_type,
                     "orderTerm": "GOOD_FOR_DAY",
                     "marketSession": "REGULAR",
-                    "limitPrice": limit_price,
+                    "limitPrice": normalized_limit_price,
                     "stopPrice": 0,
                     "Instrument": instruments,
                 }
@@ -395,7 +518,15 @@ def prepare_ticket_for_preview(
         warning
         for warning in ticket.warnings
         if "broker enrichment" not in warning.lower()
+        and not warning.startswith("Preview limit price adjusted from ")
     ]
+    if increment_warning:
+        warnings.append(increment_warning)
+
+    notes = [note]
+    if increment_warning:
+        notes.append(increment_warning)
+    notes.append("Not executed yet.")
 
     return ticket.model_copy(
         update={
@@ -404,8 +535,8 @@ def prepare_ticket_for_preview(
             "legs": prepared_legs,
             "pricing": ticket.pricing.model_copy(
                 update={
-                    "price_type": "NET_CREDIT",
-                    "limit_price": limit_price,
+                    "price_type": price_type,
+                    "limit_price": normalized_limit_price,
                     "stop_price": 0.0,
                 }
             ),
@@ -417,8 +548,8 @@ def prepare_ticket_for_preview(
             ),
             "execution_intent": TradeTicketExecutionIntent(
                 quantity=quantity,
-                price_type="NET_CREDIT",
-                limit_price=limit_price,
+                price_type=price_type,
+                limit_price=normalized_limit_price,
                 stop_price=0.0,
                 order_term="GOOD_FOR_DAY",
                 market_session="REGULAR",
@@ -426,10 +557,7 @@ def prepare_ticket_for_preview(
                 user_confirmed=False,
                 ready_for_execution=True,
                 prepared_at=now,
-                notes=[
-                    "Prepared from ticket detail form.",
-                    "Not executed yet.",
-                ],
+                notes=notes,
             ),
             "preview_request": preview_request,
             "last_error": None,
@@ -467,6 +595,11 @@ def rebuild_ticket_preview_request(ticket: TradeTicketV1) -> TradeTicketV1:
         quantity=quantity,
         limit_price=float(limit_price),
         client_order_id=client_order_id,
+        price_type=(
+            ticket.execution_intent.price_type
+            or ticket.pricing.price_type
+            or "NET_CREDIT"
+        ),
     )
 
 
@@ -518,6 +651,10 @@ def mark_ticket_previewed(
         strategy=ticket.strategy,
         source=ticket.source,
     )
+    merged_warnings = list(ticket.warnings)
+    for warning in fresh.warnings:
+        if warning not in merged_warnings:
+            merged_warnings.append(warning)
     return fresh.model_copy(
         update={
             "ticket_id": ticket.ticket_id,
@@ -526,5 +663,6 @@ def mark_ticket_previewed(
             "preview_attempts": ticket.preview_attempts,
             "status_reason": "Preview succeeded. Review response and confirm intent before execution.",
             "next_retry_at": None,
+            "warnings": merged_warnings[-25:],
         }
     )

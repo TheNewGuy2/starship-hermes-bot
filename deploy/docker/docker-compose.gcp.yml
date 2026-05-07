@@ -10,6 +10,8 @@ services:
       ENGINE_CONFIG_PATH: /opt/starship-alpha/app/configs/bot.yaml
       STARSHIP_ENV_FILE: /run/starship/starship.env
       STARSHIP_SECRETS_DIR: /run/starship/secrets
+      STARSHIP_DATA_DIR: /opt/starship-alpha/app/data
+      STARSHIP_LOG_DIR: /opt/starship-alpha/app/logs
     volumes:
       - ../../configs:/opt/starship-alpha/app/configs:ro
       - ../../data:/opt/starship-alpha/app/data
@@ -30,6 +32,8 @@ services:
       ENGINE_CONFIG_PATH: /opt/starship-alpha/app/configs/bot.yaml
       STARSHIP_ENV_FILE: /run/starship/starship.env
       STARSHIP_SECRETS_DIR: /run/starship/secrets
+      STARSHIP_DATA_DIR: /opt/starship-alpha/app/data
+      STARSHIP_LOG_DIR: /opt/starship-alpha/app/logs
     volumes:
       - ../../configs:/opt/starship-alpha/app/configs:ro
       - ../../data:/opt/starship-alpha/app/data

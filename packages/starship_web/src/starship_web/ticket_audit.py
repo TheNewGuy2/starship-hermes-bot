@@ -5,10 +5,11 @@ import uuid
 from pathlib import Path
 
 from starship_shared.trade_ticket import TradeTicketAuditEvent
+from starship_web.config import get_data_dir
 
 
 def _audit_dir() -> Path:
-    path = Path("data") / "trade_ticket_audit"
+    path = get_data_dir() / "trade_ticket_audit"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -59,3 +60,22 @@ def list_ticket_audit_events(ticket_id: str, *, limit: int = 50) -> list[TradeTi
 def load_latest_ticket_audit_event(ticket_id: str) -> TradeTicketAuditEvent | None:
     events = list_ticket_audit_events(ticket_id, limit=1)
     return events[-1] if events else None
+
+
+def delete_ticket_audit(ticket_id: str) -> bool:
+    path = _audit_path(ticket_id)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
+def clear_ticket_audit_logs() -> int:
+    removed = 0
+    for path in _audit_dir().glob("*.jsonl"):
+        try:
+            path.unlink()
+            removed += 1
+        except Exception:
+            continue
+    return removed

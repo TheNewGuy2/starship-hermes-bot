@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: starship-web-stable
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: main
+    dockerContext: .
+    dockerfilePath: ./deploy/docker/Dockerfile.web
+    autoDeployTrigger: checksPass
+    healthCheckPath: /health
+    previews:
+      generation: off
+    disk:
+      name: starship-web-data
+      mountPath: /var/data/starship
+      sizeGB: 10
+    envVars:
+      - key: STARSHIP_DATA_DIR
+        value: /var/data/starship/data
+      - key: STARSHIP_LOG_DIR
+        value: /var/data/starship/logs
+      - key: ETRADE_CALLBACK_URL
+        value: oob
+      - key: ETRADE_ENV
+        value: live
+      - key: PINE_BRIDGE_POINT_VALUE
+        value: "100"
+      - key: STARSHIP_ADMIN_USER
+        sync: false
+      - key: STARSHIP_ADMIN_PASSWORD
+        sync: false
+      - key: TRADINGVIEW_WEBHOOK_SECRET
+        sync: false
+      - key: ETRADE_DEFAULT_ACCOUNT_ID_KEY
+        sync: false
+      - key: ETRADE_CONSUMER_KEY
+        sync: false
+      - key: ETRADE_CONSUMER_SECRET
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: ENGINE_INGEST_SECRET
+        sync: false

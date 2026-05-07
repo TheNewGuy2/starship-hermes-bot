@@ -33,6 +33,20 @@ def _apply_secret_file_overrides() -> Path | None:
     return secret_dir
 
 
+def _ensure_runtime_dir(env_name: str, default_path: str) -> Path:
+    path = Path(os.environ.get(env_name, default_path)).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_data_dir() -> Path:
+    return _ensure_runtime_dir("STARSHIP_DATA_DIR", "data")
+
+
+def get_logs_dir() -> Path:
+    return _ensure_runtime_dir("STARSHIP_LOG_DIR", "logs")
+
+
 def load_runtime_env() -> tuple[Path | None, Path | None]:
     dotenv_path: Path | None = None
     for candidate in _candidate_env_files():

@@ -20,3 +20,6 @@ build/
 
 # Local bot config
 configs/bot.yaml
+
+# Local helper binaries downloaded for manual testing
+tools/cloudflared/
