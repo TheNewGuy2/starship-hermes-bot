@@ -331,6 +331,64 @@ def _derive_live_mark_summary(
     }
 
 
+def _append_symbol_candidates(
+    out: list[str],
+    raw_symbol: object,
+    *,
+    option_root: object | None = None,
+) -> None:
+    symbol = str(raw_symbol or "").strip().upper()
+    if not symbol:
+        return
+    root = str(option_root or "").strip().upper() or None
+    for candidate in _candidate_symbols(symbol, root):
+        if candidate not in out:
+            out.append(candidate)
+
+
+def _live_mark_symbol_candidates(ticket: TradeTicketV1) -> list[str]:
+    candidates: list[str] = []
+    snapshot = ticket.market_snapshot if isinstance(ticket.market_snapshot, dict) else {}
+    _append_symbol_candidates(candidates, snapshot.get("matched_symbol"))
+    _append_symbol_candidates(candidates, snapshot.get("underlier"))
+
+    for leg in ticket.legs:
+        payload = leg.broker_payload if isinstance(leg.broker_payload, dict) else {}
+        _append_symbol_candidates(candidates, payload.get("chain_lookup_symbol"))
+        _append_symbol_candidates(candidates, payload.get("original_underlier"))
+
+    _append_symbol_candidates(candidates, ticket.underlier)
+
+    for leg in ticket.legs:
+        payload = leg.broker_payload if isinstance(leg.broker_payload, dict) else {}
+        product = payload.get("Product") if isinstance(payload.get("Product"), dict) else {}
+        product_symbol = product.get("symbol") if isinstance(product, dict) else None
+        _append_symbol_candidates(
+            candidates,
+            leg.symbol or product_symbol,
+            option_root=payload.get("option_root_symbol") or product_symbol,
+        )
+
+    return candidates
+
+
+def _live_mark_error_summary(
+    ticket: TradeTicketV1,
+    *,
+    error: Exception,
+    fallback_entry_credit: float | None = None,
+) -> dict[str, object]:
+    return {
+        "captured_at": _utc_now_iso(),
+        "error": str(error),
+        "entry_credit_reference": _entry_reference_credit(
+            ticket,
+            fallback_entry_credit,
+        ),
+        "market_snapshot": ticket.market_snapshot,
+    }
+
+
 def _preferred_expiry_rows(
     expiry_rows: list[dict[str, object]],
     preferred_expiry: tuple[int, int, int] | None,
@@ -531,26 +589,36 @@ def _refresh_live_mark(
     first_leg = ticket.legs[0]
     if not first_leg.expiry_year or not first_leg.expiry_month or not first_leg.expiry_day:
         raise RuntimeError("Ticket legs are missing expiry data.")
-    symbol = first_leg.symbol
-    chain = client.get_option_chain(
-        symbol,
-        expiry_year=first_leg.expiry_year,
-        expiry_month=first_leg.expiry_month,
-        expiry_day=first_leg.expiry_day,
-        include_weekly=True,
-        price_type="ALL",
-    )
-    matches = _find_matching_contracts(ticket, chain)
-    if matches is None:
-        raise RuntimeError("Current live chain did not contain all matched ticket strikes.")
-    return _derive_live_mark_summary(
-        ticket,
-        matched_symbol=symbol,
-        expiry_year=first_leg.expiry_year,
-        expiry_month=first_leg.expiry_month,
-        expiry_day=first_leg.expiry_day,
-        matches=matches,
-        fallback_entry_credit=fallback_entry_credit,
+    attempts: list[dict[str, object]] = []
+    for symbol in _live_mark_symbol_candidates(ticket):
+        try:
+            chain = client.get_option_chain(
+                symbol,
+                expiry_year=first_leg.expiry_year,
+                expiry_month=first_leg.expiry_month,
+                expiry_day=first_leg.expiry_day,
+                include_weekly=True,
+                price_type="ALL",
+            )
+        except Exception as exc:
+            attempts.append({"symbol": symbol, "matched": False, "error": str(exc)})
+            continue
+        matches = _find_matching_contracts(ticket, chain)
+        attempts.append({"symbol": symbol, "matched": matches is not None})
+        if matches is None:
+            continue
+        return _derive_live_mark_summary(
+            ticket,
+            matched_symbol=symbol,
+            expiry_year=first_leg.expiry_year,
+            expiry_month=first_leg.expiry_month,
+            expiry_day=first_leg.expiry_day,
+            matches=matches,
+            fallback_entry_credit=fallback_entry_credit,
+        )
+    raise RuntimeError(
+        "Current live chain did not contain all matched ticket strikes. "
+        f"Attempts={attempts}"
     )
 
 
@@ -618,6 +686,7 @@ def _apply_state_event(
     latest_live_mark: dict[str, object] | None = None,
     clear_close_ticket: bool = False,
     clear_closed_at: bool = False,
+    update_strikes: bool = True,
 ) -> PineTradeState:
     now = _utc_now_iso()
     event_log = list(state.event_log)[-19:]
@@ -661,12 +730,16 @@ def _apply_state_event(
             "last_event_id": event.event_id,
             "last_event_type": event.event_type,
             "last_event_at": event.bar_time or now,
-            "current_strikes": {
-                "short_put": event.short_put or state.current_strikes.get("short_put"),
-                "long_put": event.long_put or state.current_strikes.get("long_put"),
-                "short_call": event.short_call or state.current_strikes.get("short_call"),
-                "long_call": event.long_call or state.current_strikes.get("long_call"),
-            },
+            "current_strikes": (
+                {
+                    "short_put": event.short_put or state.current_strikes.get("short_put"),
+                    "long_put": event.long_put or state.current_strikes.get("long_put"),
+                    "short_call": event.short_call or state.current_strikes.get("short_call"),
+                    "long_call": event.long_call or state.current_strikes.get("long_call"),
+                }
+                if update_strikes
+                else dict(state.current_strikes)
+            ),
             "latest_aux": dict(event.aux),
             "latest_live_mark": latest_live_mark or state.latest_live_mark,
             "latest_pine_payload": dict(event.raw_payload),
@@ -710,9 +783,27 @@ def process_pine_alert(
 
     if event.event_type == "ENTRY":
         if state.active:
-            raise RuntimeError(
-                f"State {state.state_id} is already active with entry ticket {state.entry_ticket_id}."
+            state = _apply_state_event(
+                state,
+                event=event,
+                status=state.status,
+                active=True,
+                entry_ticket_id=state.entry_ticket_id,
+                latest_live_mark=state.latest_live_mark,
+                warnings=[
+                    "Ignored ENTRY alert because the Pine bridge state is already active "
+                    f"with entry ticket {state.entry_ticket_id}."
+                ],
+                update_strikes=False,
             )
+            save_pine_state(state)
+            return {
+                "ok": True,
+                "duplicate": False,
+                "ignored": True,
+                "reason": "state_already_active",
+                "state": state.model_dump(),
+            }
         if None in (event.short_put, event.long_put, event.short_call, event.long_call):
             raise RuntimeError("ENTRY alert is missing one or more strike fields.")
         ticket = _build_entry_ticket(event, account_id_key)
@@ -771,15 +862,11 @@ def process_pine_alert(
             )
             entry_warnings: list[str] = []
         except Exception as exc:
-            live_mark = {
-                "captured_at": _utc_now_iso(),
-                "error": str(exc),
-                "entry_credit_reference": _entry_reference_credit(
-                    final_ticket,
-                    event.target_entry_credit,
-                ),
-                "market_snapshot": final_ticket.market_snapshot,
-            }
+            live_mark = _live_mark_error_summary(
+                final_ticket,
+                error=exc,
+                fallback_entry_credit=event.target_entry_credit,
+            )
             entry_warnings = [f"Initial live mark refresh failed: {exc}"]
         state = _apply_state_event(
             state,
@@ -807,11 +894,20 @@ def process_pine_alert(
     entry_ticket = load_ticket(state.entry_ticket_id)
     if entry_ticket is None:
         raise RuntimeError(f"Entry ticket not found: {state.entry_ticket_id}")
-    live_mark = _refresh_live_mark(
-        entry_ticket,
-        client=live_client,
-        fallback_entry_credit=event.target_entry_credit,
-    )
+    live_mark_warnings: list[str] = []
+    try:
+        live_mark = _refresh_live_mark(
+            entry_ticket,
+            client=live_client,
+            fallback_entry_credit=event.target_entry_credit,
+        )
+    except Exception as exc:
+        live_mark = _live_mark_error_summary(
+            entry_ticket,
+            error=exc,
+            fallback_entry_credit=event.target_entry_credit,
+        )
+        live_mark_warnings = [f"Live mark refresh failed: {exc}"]
 
     if event.event_type == "MANAGE":
         if not state.active:
@@ -822,6 +918,7 @@ def process_pine_alert(
                 active=False,
                 latest_live_mark=live_mark,
                 warnings=[
+                    *live_mark_warnings,
                     "Ignored MANAGE alert because the Pine bridge state is not active. "
                     f"Last event before this alert was {state.last_event_type or 'n/a'}.",
                 ],
@@ -841,6 +938,7 @@ def process_pine_alert(
             status="open",
             active=True,
             latest_live_mark=live_mark,
+            warnings=live_mark_warnings,
         )
         save_pine_state(state)
         return {
@@ -854,7 +952,24 @@ def process_pine_alert(
     close_ticket = _build_close_ticket(entry_ticket, event, live_mark=live_mark)
     close_limit = event.target_close_debit or _as_float(live_mark.get("close_mid_debit"))
     if close_limit is None:
-        raise RuntimeError("Could not determine a live close debit for CLOSE alert.")
+        warning = "Could not determine a live close debit for CLOSE alert."
+        state = _apply_state_event(
+            state,
+            event=event,
+            status="error",
+            active=False,
+            latest_live_mark=live_mark,
+            warnings=[*live_mark_warnings, warning],
+        )
+        save_pine_state(state)
+        return {
+            "ok": False,
+            "duplicate": False,
+            "state": state.model_dump(),
+            "entry_ticket": entry_ticket.model_dump(),
+            "live_mark": live_mark,
+            "error": warning,
+        }
     first_leg = close_ticket.legs[0]
     prepared_close = prepare_ticket_for_preview(
         close_ticket,
@@ -886,7 +1001,7 @@ def process_pine_alert(
             active=False,
             close_ticket_id=final_close_ticket.ticket_id,
             latest_live_mark=live_mark,
-            warnings=[str(exc)],
+            warnings=[*live_mark_warnings, str(exc)],
         )
         save_pine_state(state)
         return {
@@ -904,6 +1019,7 @@ def process_pine_alert(
         active=False,
         close_ticket_id=final_close_ticket.ticket_id,
         latest_live_mark=live_mark,
+        warnings=live_mark_warnings,
     )
     save_pine_state(state)
     return {

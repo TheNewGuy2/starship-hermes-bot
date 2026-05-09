@@ -92,6 +92,64 @@ class FakeClient:
         }
 
 
+class StrictSpxChainClient(FakeClient):
+    def __init__(self):
+        self.option_chain_symbols: list[str] = []
+
+    def get_option_chain(
+        self,
+        symbol,
+        *,
+        expiry_year,
+        expiry_month,
+        expiry_day,
+        include_weekly=True,
+        price_type="ALL",
+    ):
+        self.option_chain_symbols.append(symbol)
+        if symbol == "SPXW":
+            raise RuntimeError("SPXW is invalid for option-chain lookup")
+        payload = super().get_option_chain(
+            symbol,
+            expiry_year=expiry_year,
+            expiry_month=expiry_month,
+            expiry_day=expiry_day,
+            include_weekly=include_weekly,
+            price_type=price_type,
+        )
+        pairs = payload["OptionChainResponse"]["OptionPair"]
+        for pair in pairs:
+            pair["Put"]["optionRootSymbol"] = "SPXW"
+            pair["Call"]["optionRootSymbol"] = "SPXW"
+        return payload
+
+
+class FailingRefreshClient(FakeClient):
+    def __init__(self):
+        self.fail_chain = False
+
+    def get_option_chain(
+        self,
+        symbol,
+        *,
+        expiry_year,
+        expiry_month,
+        expiry_day,
+        include_weekly=True,
+        price_type="ALL",
+    ):
+        if self.fail_chain:
+            raise RuntimeError(f"forced option-chain failure for {symbol}")
+        return super().get_option_chain(
+            symbol,
+            expiry_year=expiry_year,
+            expiry_month=expiry_month,
+            expiry_day=expiry_day,
+            include_weekly=include_weekly,
+            price_type=price_type,
+        )
+
+
 def _entry_payload():
     return {
         "strategy_name": "hermes_v3_bridge_test",
@@ -306,6 +364,22 @@ def test_pine_bridge_manage_after_close_does_not_reopen_state(isolated_bridge):
     ]
 
 
+def test_pine_bridge_ignores_entry_when_state_already_active(isolated_bridge):
+    client = isolated_bridge
+
+    process_pine_alert(_entry_payload(), client=client)
+    second_entry = _entry_payload_after_close()
+    second_entry["short_put"] = 7000
+    ignored = process_pine_alert(second_entry, client=client)
+
+    assert ignored["ok"] is True
+    assert ignored["ignored"] is True
+    assert ignored["reason"] == "state_already_active"
+    assert ignored["state"]["status"] == "open"
+    assert ignored["state"]["active"] is True
+    assert ignored["state"]["current_strikes"]["short_put"] == 7105
+
+
 def test_pine_bridge_new_entry_after_close_clears_old_close_ticket(isolated_bridge):
     client = isolated_bridge
 
@@ -323,6 +397,63 @@ def test_pine_bridge_new_entry_after_close_clears_old_close_ticket(isolated_brid
         "CLOSE",
         "ENTRY",
     ]
+
+
+def test_pine_bridge_live_mark_uses_spx_for_spxw_preview_symbols(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ETRADE_DEFAULT_ACCOUNT_ID_KEY", "demo-account")
+    monkeypatch.delenv("TRADINGVIEW_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("PINE_BRIDGE_POINT_VALUE", "100")
+    client = StrictSpxChainClient()
+
+    entry = process_pine_alert(_entry_payload(), client=client)
+    manage = process_pine_alert(_manage_payload(), client=client)
+
+    assert entry["ok"] is True
+    assert {leg["symbol"] for leg in entry["ticket"]["legs"]} == {"SPXW"}
+    assert manage["ok"] is True
+    assert manage["live_mark"]["matched_symbol"] == "SPX"
+    assert "SPXW" not in client.option_chain_symbols
+
+
+def test_pine_bridge_manage_records_event_when_live_mark_fails(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ETRADE_DEFAULT_ACCOUNT_ID_KEY", "demo-account")
+    monkeypatch.delenv("TRADINGVIEW_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("PINE_BRIDGE_POINT_VALUE", "100")
+    client = FailingRefreshClient()
+
+    process_pine_alert(_entry_payload(), client=client)
+    client.fail_chain = True
+    manage = process_pine_alert(_manage_payload(), client=client)
+
+    assert manage["ok"] is True
+    assert manage["state"]["status"] == "open"
+    assert manage["state"]["active"] is True
+    assert manage["state"]["event_log"][-1]["event_type"] == "MANAGE"
+    assert "error" in manage["state"]["latest_live_mark"]
+
+
+def test_pine_bridge_close_builds_ticket_when_live_mark_fails_but_target_debit_exists(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ETRADE_DEFAULT_ACCOUNT_ID_KEY", "demo-account")
+    monkeypatch.delenv("TRADINGVIEW_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("PINE_BRIDGE_POINT_VALUE", "100")
+    client = FailingRefreshClient()
+
+    process_pine_alert(_entry_payload(), client=client)
+    client.fail_chain = True
+    close = process_pine_alert(_close_payload(), client=client)
+
+    assert close["ok"] is True
+    assert close["state"]["status"] == "closed"
+    assert close["state"]["active"] is False
+    assert close["state"]["event_log"][-1]["event_type"] == "CLOSE"
+    assert close["close_ticket"]["status"] == "previewed"
+    assert "error" in close["state"]["latest_live_mark"]
 
 
 def test_pine_bridge_duplicate_event_is_idempotent(isolated_bridge):
