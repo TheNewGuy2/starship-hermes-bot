@@ -43,6 +43,17 @@ Notes:
 - `TRADINGVIEW_WEBHOOK_SECRET` is optional but strongly recommended.
 - `PINE_BRIDGE_POINT_VALUE` defaults to `100`.
 
+## E*TRADE token behavior
+
+E*TRADE access tokens have two important lifecycle rules:
+
+- After inactivity, E*TRADE can reject the token with `oauth_problem=token_rejected`.
+- After the daily E*TRADE expiration boundary, a fresh browser authorization is still required.
+
+The bridge now handles the inactivity case automatically. If an E*TRADE API call returns `token_rejected`, the app calls the E*TRADE renew endpoint and retries that original request once.
+
+This does not remove the need for the daily E*TRADE login/authorization flow when the token has fully expired.
+
 ## Webhook endpoint
 
 TradingView should post alerts to:

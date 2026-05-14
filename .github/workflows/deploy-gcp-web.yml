@@ -65,7 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           APP_DIR="${GCP_VM_APP_DIR:-/opt/starship-alpha/app}"
-          REMOTE_CMD="cd '${APP_DIR}' && git fetch origin && git checkout main && git pull --ff-only origin main && bash deploy/gcp/deploy-web-vm.sh"
+          DEPLOY_CMD="cd '${APP_DIR}' && git fetch origin && git checkout main && git pull --ff-only origin main && bash deploy/gcp/deploy-web-vm.sh"
+          REMOTE_CMD="$(printf "sudo bash -lc %q" "${DEPLOY_CMD}")"
           gcloud compute ssh "${GCP_INSTANCE}" \
             --project "${GCP_PROJECT_ID}" \
             --zone "${GCP_ZONE}" \

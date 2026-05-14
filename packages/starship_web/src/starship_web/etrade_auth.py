@@ -137,6 +137,22 @@ def renew_access_token(
     return response.text.strip()
 
 
+def renew_stored_access_token(access_token: ETradeAccessToken | None = None) -> str:
+    token = access_token or load_access_token()
+    if token is None:
+        raise RuntimeError("No stored E*TRADE access token found")
+
+    config = load_consumer_config()
+    message = renew_access_token(config, token)
+    save_access_token(
+        ETradeAccessToken(
+            oauth_token=token.oauth_token,
+            oauth_token_secret=token.oauth_token_secret,
+        )
+    )
+    return message
+
+
 def save_pending_request_token(token: ETradeRequestToken) -> None:
     _pending_request_file().write_text(
         json.dumps(asdict(token), indent=2), encoding="utf-8"

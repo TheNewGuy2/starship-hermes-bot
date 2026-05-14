@@ -17,6 +17,7 @@ build/
 
 .env
 .envrc
+firebase-debug.log
 
 # Local bot config
 configs/bot.yaml

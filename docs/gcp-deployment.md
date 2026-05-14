@@ -39,6 +39,9 @@ Practical recommendation:
 
 ## Repo files for the GCP lane
 
+- Beginner walkthrough: [docs/firebase-gcp-beginner-walkthrough.md](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/docs/firebase-gcp-beginner-walkthrough.md:1)
+- Cloud Shell VM bootstrap: [deploy/gcp/bootstrap-stable-vm.sh](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/gcp/bootstrap-stable-vm.sh:1)
+- VM app setup: [deploy/gcp/setup-vm-app.sh](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/gcp/setup-vm-app.sh:1)
 - Docker compose stack: [deploy/docker/docker-compose.gcp.yml](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/docker/docker-compose.gcp.yml:1)
 - Web image: [deploy/docker/Dockerfile.web](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/docker/Dockerfile.web:1)
 - Remote VM deploy script: [deploy/gcp/deploy-web-vm.sh](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/gcp/deploy-web-vm.sh:1)

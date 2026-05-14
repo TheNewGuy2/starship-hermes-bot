@@ -30,7 +30,7 @@ from starship_web.etrade_auth import (
     load_access_token,
     load_consumer_config,
     load_pending_request_token,
-    renew_access_token,
+    renew_stored_access_token,
     request_token,
     save_access_token,
     save_pending_request_token,
@@ -882,6 +882,7 @@ def _render_etrade_console(
     status_lines = [
         f"Token stored: {'yes' if token else 'no'}",
         f"Pending auth token: {'yes' if pending else 'no'}",
+        "Auto-renew on inactive token: yes, then retry once",
     ]
     if token_status.get("has_token"):
         status_lines.append(
@@ -2856,8 +2857,7 @@ async def etrade_renew() -> dict[str, object]:
         raise HTTPException(400, "No stored E*TRADE access token found")
 
     try:
-        config = load_consumer_config()
-        message = renew_access_token(config, token)
+        message = renew_stored_access_token(token)
         return {"ok": True, "message": message}
     except Exception as exc:
         log.exception("etrade renew failed")
@@ -2871,8 +2871,7 @@ async def etrade_renew_browser() -> HTMLResponse:
         return _render_etrade_console(error="No stored E*TRADE access token found.")
 
     try:
-        config = load_consumer_config()
-        message = renew_access_token(config, token)
+        message = renew_stored_access_token(token)
         return _render_etrade_console(message=f"Renew result: {message}")
     except Exception as exc:
         log.exception("etrade renew browser failed")
