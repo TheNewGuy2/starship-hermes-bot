@@ -117,6 +117,23 @@ def _infer_leg_call_put(ticket: TradeTicketV1, leg_index: int) -> str:
     return "CALL"
 
 
+def _normalize_root(value: object) -> str | None:
+    root = str(value or "").strip().upper()
+    return root or None
+
+
+def _preferred_order_option_root(event: PineAlertEvent) -> str | None:
+    explicit_root = _normalize_root(event.option_root)
+    underlier = str(event.underlier or "").strip().upper()
+    if explicit_root and explicit_root not in {"SPX", "SPXW"}:
+        return explicit_root
+    if underlier in {"SPX", "SPXW"}:
+        # For this 0DTE bridge, SPX signals should route to the PM-settled SPXW
+        # root when E*TRADE exposes both SPX and SPXW contracts on monthly expiry.
+        return "SPXW"
+    return explicit_root
+
+
 def _extract_expiry_rows(payload: dict[str, object]) -> list[dict[str, object]]:
     root = payload.get("OptionExpireDateResponse", {}) if isinstance(payload, dict) else {}
     rows = root.get("ExpirationDate", []) if isinstance(root, dict) else []
@@ -136,17 +153,23 @@ def _selected_expiry_from_chain(chain_payload: dict[str, object]) -> tuple[int, 
         return None
 
 
-def _find_matching_contracts(ticket: TradeTicketV1, chain_payload: dict[str, object]) -> list[dict[str, object]] | None:
+def _find_matching_contracts(
+    ticket: TradeTicketV1,
+    chain_payload: dict[str, object],
+    *,
+    preferred_option_root: str | None = None,
+) -> list[dict[str, object]] | None:
     root = chain_payload.get("OptionChainResponse", {}) if isinstance(chain_payload, dict) else {}
     pairs = root.get("OptionPair", []) if isinstance(root, dict) else []
     if isinstance(pairs, dict):
         pairs = [pairs]
 
     matches: list[dict[str, object]] = []
+    preferred_root = _normalize_root(preferred_option_root)
     for index, leg in enumerate(ticket.legs):
         target_strike = leg.strike_price
         target_cp = _infer_leg_call_put(ticket, index)
-        matched = None
+        strike_matches: list[dict[str, object]] = []
         for pair in pairs:
             if not isinstance(pair, dict):
                 continue
@@ -157,8 +180,15 @@ def _find_matching_contracts(ticket: TradeTicketV1, chain_payload: dict[str, obj
             if strike is None or target_strike is None:
                 continue
             if abs(strike - target_strike) < 1e-6:
-                matched = branch
-                break
+                strike_matches.append(branch)
+        matched = None
+        if preferred_root:
+            for candidate in strike_matches:
+                if _normalize_root(candidate.get("optionRootSymbol")) == preferred_root:
+                    matched = candidate
+                    break
+        if matched is None and strike_matches:
+            matched = strike_matches[0]
         if matched is None:
             return None
         matches.append(matched)
@@ -169,6 +199,12 @@ def _round_price(value: float | None) -> float | None:
     if value is None:
         return None
     return round(value + 1e-9, 2)
+
+
+def _price_gap(actual: float | None, target: float | None) -> float | None:
+    if actual is None or target is None:
+        return None
+    return actual - target
 
 
 def _derive_entry_credit_suggestion(ticket: TradeTicketV1, matches: list[dict[str, object]]) -> dict[str, float | None]:
@@ -331,6 +367,83 @@ def _derive_live_mark_summary(
     }
 
 
+def _event_price_snapshot(
+    event: PineAlertEvent,
+    live_mark: dict[str, object] | None,
+) -> dict[str, object]:
+    mark = live_mark or {}
+    entry_credit = _as_float(mark.get("entry_credit_reference"))
+    if entry_credit is None:
+        entry_credit = event.target_entry_credit
+    current_open_mid = _as_float(mark.get("current_open_mid_credit"))
+    current_open_natural = _as_float(mark.get("current_open_natural_credit"))
+    close_mid = _as_float(mark.get("close_mid_debit"))
+    close_natural = _as_float(mark.get("close_natural_debit"))
+    pnl_mid_points = _as_float(mark.get("pnl_mid_points"))
+    pnl_natural_points = _as_float(mark.get("pnl_natural_points"))
+    pnl_mid_usd = _as_float(mark.get("pnl_mid_usd"))
+    pnl_natural_usd = _as_float(mark.get("pnl_natural_usd"))
+    target_entry = event.target_entry_credit
+    target_close = event.target_close_debit
+
+    source = "live_mark" if mark and "error" not in mark else "pine_payload"
+    if event.event_type == "ENTRY":
+        display_label = "Entry credit"
+        display_value = entry_credit if entry_credit is not None else current_open_mid
+        if display_value is None:
+            display_value = event.target_entry_credit
+    else:
+        display_label = "Close mid debit"
+        display_value = close_mid
+        if display_value is None and event.target_close_debit is not None:
+            display_label = "Target close debit"
+            display_value = event.target_close_debit
+
+    return {
+        "display_label": display_label,
+        "display_value": _round_price(display_value),
+        "entry_credit_reference": _round_price(entry_credit),
+        "current_open_mid_credit": _round_price(current_open_mid),
+        "current_open_natural_credit": _round_price(current_open_natural),
+        "close_mid_debit": _round_price(close_mid),
+        "close_natural_debit": _round_price(close_natural),
+        "pnl_mid_points": _round_price(pnl_mid_points),
+        "pnl_natural_points": _round_price(pnl_natural_points),
+        "pnl_mid_usd": _round_price(pnl_mid_usd),
+        "pnl_natural_usd": _round_price(pnl_natural_usd),
+        "target_entry_credit": _round_price(target_entry),
+        "target_close_debit": _round_price(target_close),
+        "target_entry_mid_gap": _round_price(_price_gap(current_open_mid, target_entry)),
+        "target_entry_natural_gap": _round_price(_price_gap(current_open_natural, target_entry)),
+        "target_close_mid_gap": _round_price(_price_gap(close_mid, target_close)),
+        "target_close_natural_gap": _round_price(_price_gap(close_natural, target_close)),
+        "captured_at": mark.get("captured_at"),
+        "source": source,
+        "error": mark.get("error"),
+    }
+
+
+def _event_strike_snapshot(
+    state: PineTradeState,
+    event: PineAlertEvent,
+) -> dict[str, float | None]:
+    current = state.current_strikes or {}
+    return {
+        "short_put": event.short_put
+        if event.short_put is not None
+        else current.get("short_put"),
+        "long_put": event.long_put
+        if event.long_put is not None
+        else current.get("long_put"),
+        "short_call": event.short_call
+        if event.short_call is not None
+        else current.get("short_call"),
+        "long_call": event.long_call
+        if event.long_call is not None
+        else current.get("long_call"),
+    }
+
+
 def _append_symbol_candidates(
     out: list[str],
     raw_symbol: object,
@@ -433,13 +546,15 @@ def _apply_contract_matches(
         match = matches[index]
         merged_payload = dict(leg.broker_payload)
         merged_payload["contract_match"] = match
-        if match.get("optionRootSymbol") is not None:
-            merged_payload["option_root_symbol"] = str(match.get("optionRootSymbol"))
+        option_root = _normalize_root(match.get("optionRootSymbol"))
+        if option_root is not None:
+            merged_payload["option_root_symbol"] = option_root
         merged_payload["chain_lookup_symbol"] = matched_symbol
+        order_symbol = option_root or matched_symbol
         legs.append(
             leg.model_copy(
                 update={
-                    "symbol": matched_symbol,
+                    "symbol": order_symbol,
                     "call_put": _infer_leg_call_put(ticket, index),
                     "expiry_year": expiry_year,
                     "expiry_month": expiry_month,
@@ -514,6 +629,7 @@ def _match_ticket_for_entry(
     client: ETradeClient,
 ) -> tuple[TradeTicketV1, dict[str, object]]:
     symbols = _candidate_symbols(event.underlier, event.option_root)
+    preferred_option_root = _preferred_order_option_root(event)
     preferred_expiry = _parse_bar_date(event)
     attempts: list[dict[str, object]] = []
     for symbol in symbols:
@@ -552,7 +668,11 @@ def _match_ticket_for_entry(
                     }
                 )
                 continue
-            matches = _find_matching_contracts(ticket, chain)
+            matches = _find_matching_contracts(
+                ticket,
+                chain,
+                preferred_option_root=preferred_option_root,
+            )
             attempts.append({"symbol": symbol, "expiry": {"year": year, "month": month, "day": day}, "matched": matches is not None})
             if matches is None:
                 continue
@@ -690,12 +810,18 @@ def _apply_state_event(
 ) -> PineTradeState:
     now = _utc_now_iso()
     event_log = list(state.event_log)[-19:]
+    price_snapshot = _event_price_snapshot(event, latest_live_mark)
     event_log.append(
         {
             "event_id": event.event_id,
             "event_type": event.event_type,
+            "note": event.note,
             "bar_time": event.bar_time,
             "processed_at": now,
+            "quantity": event.quantity,
+            "strikes": _event_strike_snapshot(state, event),
+            "aux": dict(event.aux),
+            "price": price_snapshot,
         }
     )
     processed = [item for item in state.processed_event_ids if item != event.event_id]

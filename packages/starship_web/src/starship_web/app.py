@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starship_shared.schemas import EngineFactV1
 from starship_shared.signing import verify_body_v1
@@ -43,6 +43,10 @@ from starship_web.execution_service import (
     submit_execution_package,
 )
 from starship_web.pine_bridge import get_tradingview_webhook_secret, process_pine_alert
+from starship_web.pine_calibration import (
+    build_pine_calibration_report,
+    pine_calibration_csv,
+)
 from starship_web.pine_state_store import clear_pine_states, list_pine_states, load_pine_state
 from starship_web.ticket_audit import (
     append_ticket_audit_event,
@@ -1147,9 +1151,23 @@ def _render_home(snapshot: dict[str, object]) -> HTMLResponse:
     )
     latest_pine = pine_info.get("latest", {}) if isinstance(pine_info, dict) else {}
     latest_pine_close_text = "n/a"
+    latest_pine_current_price = "n/a"
+    latest_pine_target_close = "n/a"
+    latest_pine_pnl_text = "n/a"
     if isinstance(latest_pine, dict):
+        latest_pine_mark = latest_pine.get("latest_live_mark")
+        if isinstance(latest_pine_mark, dict):
+            latest_pine_current_price = _bridge_state_close_quote_text(latest_pine_mark)
+            latest_pine_pnl_text = _bridge_state_pnl_text(latest_pine_mark)
         pine_events = latest_pine.get("event_log")
         if isinstance(pine_events, list):
+            latest_pine_target_close = _format_bridge_number(
+                _latest_bridge_event_price_value(
+                    pine_events,
+                    "target_close_debit",
+                    event_type="CLOSE",
+                )
+            )
             close_events = [
                 event
                 for event in pine_events
@@ -1250,6 +1268,9 @@ def _render_home(snapshot: dict[str, object]) -> HTMLResponse:
           <p><strong>Status:</strong> {escape(str(latest_pine.get('status') or 'n/a'))}</p>
           <p><strong>Last Event:</strong> {escape(str(latest_pine.get('last_event_type') or 'n/a'))}</p>
           <p><strong>Last Close:</strong> {escape(latest_pine_close_text)}</p>
+          <p><strong>Close Price Now:</strong> {escape(latest_pine_current_price)}</p>
+          <p><strong>Pine Target Close:</strong> {escape(latest_pine_target_close)}</p>
+          <p><strong>Live P/L:</strong> {escape(latest_pine_pnl_text)}</p>
         </section>
         """
         if latest_pine
@@ -1362,7 +1383,155 @@ def _latest_bridge_event(state: object, event_type: str) -> dict[str, object] | 
     return events[-1] if events else None
 
 
-def _render_bridge_event_timeline(state: object, *, limit: int = 10) -> str:
+def _format_bridge_number(value: object, *, signed: bool = False) -> str:
+    number = _as_float(value)
+    if number is None:
+        return "n/a"
+    prefix = "+" if signed and number > 0 else ""
+    return f"{prefix}{number:.2f}"
+
+
+def _format_bridge_usd(value: object, *, signed: bool = False) -> str:
+    number = _as_float(value)
+    if number is None:
+        return "n/a"
+    prefix = "+" if signed and number > 0 else ""
+    return f"{prefix}${number:.2f}"
+
+
+def _format_bridge_gap(actual: object, target: object) -> str | None:
+    actual_number = _as_float(actual)
+    target_number = _as_float(target)
+    if actual_number is None or target_number is None:
+        return None
+    return _format_bridge_number(actual_number - target_number, signed=True)
+
+
+def _format_bridge_event_price(event: dict[str, object]) -> str:
+    price = event.get("price")
+    if not isinstance(price, dict):
+        return "n/a"
+
+    label = str(price.get("display_label") or "Price")
+    value = _format_bridge_number(price.get("display_value"))
+    detail_parts = []
+
+    entry_credit = _as_float(price.get("entry_credit_reference"))
+    open_mid = _as_float(price.get("current_open_mid_credit"))
+    open_natural = _as_float(price.get("current_open_natural_credit"))
+    close_mid = _as_float(price.get("close_mid_debit"))
+    close_natural = _as_float(price.get("close_natural_debit"))
+    pnl_points = _as_float(price.get("pnl_mid_points"))
+    pnl_usd = _as_float(price.get("pnl_mid_usd"))
+    pnl_natural_points = _as_float(price.get("pnl_natural_points"))
+    pnl_natural_usd = _as_float(price.get("pnl_natural_usd"))
+    target_entry = _as_float(price.get("target_entry_credit"))
+    target_close = _as_float(price.get("target_close_debit"))
+
+    if entry_credit is not None and label.lower() != "entry credit":
+        detail_parts.append(f"entry {_format_bridge_number(entry_credit)}")
+    if open_mid is not None or open_natural is not None:
+        detail_parts.append(
+            "open "
+            f"mid {_format_bridge_number(open_mid)} / "
+            f"nat {_format_bridge_number(open_natural)}"
+        )
+    if close_mid is not None and label.lower() != "close mid debit":
+        detail_parts.append(f"close mid {_format_bridge_number(close_mid)}")
+    if close_natural is not None:
+        detail_parts.append(f"close nat {_format_bridge_number(close_natural)}")
+    if target_entry is not None:
+        detail_parts.append(f"Pine target entry {_format_bridge_number(target_entry)}")
+    if target_close is not None:
+        target_note = f"Pine target close {_format_bridge_number(target_close)}"
+        mid_gap = _format_bridge_gap(close_mid, target_close)
+        nat_gap = _format_bridge_gap(close_natural, target_close)
+        if mid_gap is not None:
+            target_note += f" | mid-target {mid_gap}"
+        if nat_gap is not None:
+            target_note += f" | nat-target {nat_gap}"
+        detail_parts.append(target_note)
+    if pnl_points is not None:
+        detail_parts.append(f"mid P/L {_format_bridge_number(pnl_points, signed=True)} pts")
+    if pnl_usd is not None:
+        detail_parts.append(_format_bridge_usd(pnl_usd, signed=True))
+    if pnl_natural_points is not None or pnl_natural_usd is not None:
+        detail_parts.append(
+            "nat P/L "
+            f"{_format_bridge_number(pnl_natural_points, signed=True)} pts / "
+            f"{_format_bridge_usd(pnl_natural_usd, signed=True)}"
+        )
+
+    source = str(price.get("source") or "").strip()
+    if source and source != "live_mark":
+        detail_parts.append(source)
+
+    details = " | ".join(detail_parts)
+    meta_html = (
+        f'<div class="price-meta">{escape(details)}</div>' if details else ""
+    )
+    return (
+        f'<div class="price-main">{escape(label)} {escape(value)}</div>'
+        f"{meta_html}"
+    )
+
+
+def _bridge_state_price_text(live_mark: dict[str, object], key: str) -> str:
+    return _format_bridge_number(live_mark.get(key))
+
+
+def _bridge_state_close_quote_text(live_mark: dict[str, object]) -> str:
+    return (
+        f"mid {_bridge_state_price_text(live_mark, 'close_mid_debit')} | "
+        f"natural {_bridge_state_price_text(live_mark, 'close_natural_debit')}"
+    )
+
+
+def _bridge_state_open_quote_text(live_mark: dict[str, object]) -> str:
+    return (
+        f"mid {_bridge_state_price_text(live_mark, 'current_open_mid_credit')} | "
+        f"natural {_bridge_state_price_text(live_mark, 'current_open_natural_credit')}"
+    )
+
+
+def _latest_bridge_event_price_value(
+    events: object,
+    key: str,
+    *,
+    event_type: str | None = None,
+) -> object | None:
+    if not isinstance(events, list):
+        return None
+    target_type = event_type.upper() if event_type else None
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        if target_type and str(event.get("event_type") or "").upper() != target_type:
+            continue
+        price = event.get("price")
+        if not isinstance(price, dict):
+            continue
+        value = price.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _bridge_state_pnl_text(live_mark: dict[str, object]) -> str:
+    pnl_points = _as_float(live_mark.get("pnl_mid_points"))
+    pnl_usd = _as_float(live_mark.get("pnl_mid_usd"))
+    if pnl_points is None and pnl_usd is None:
+        legacy_pnl = live_mark.get("estimated_pnl")
+        return "n/a" if legacy_pnl is None else str(legacy_pnl)
+    parts = []
+    if pnl_points is not None:
+        parts.append(f"{_format_bridge_number(pnl_points, signed=True)} pts")
+    if pnl_usd is not None:
+        parts.append(_format_bridge_usd(pnl_usd, signed=True))
+    return " / ".join(parts) or "n/a"
+
+
+def _render_bridge_event_timeline(state: object, *, limit: int = 20) -> str:
     events = list(getattr(state, "event_log", []) or [])[-limit:]
     if not events:
         return "<p>No Pine events recorded yet.</p>"
@@ -1375,11 +1544,13 @@ def _render_bridge_event_timeline(state: object, *, limit: int = 10) -> str:
         processed = str(event.get("processed_at") or "n/a")
         bar_time = str(event.get("bar_time") or "n/a")
         event_id = str(event.get("event_id") or "n/a")
+        price_html = _format_bridge_event_price(event)
         rows.append(
             f"""
             <tr class="event-{escape(css_event)}">
               <td class="event-type">{escape(event_type)}</td>
               <td>{escape(reason)}</td>
+              <td>{price_html}</td>
               <td>{escape(processed)}</td>
               <td>{escape(bar_time)}</td>
               <td><code>{escape(event_id)}</code></td>
@@ -1393,6 +1564,7 @@ def _render_bridge_event_timeline(state: object, *, limit: int = 10) -> str:
         <tr>
           <th>Type</th>
           <th>Reason</th>
+          <th>Price</th>
           <th>Processed</th>
           <th>Bar Time</th>
           <th>Event ID</th>
@@ -1412,8 +1584,17 @@ def _render_pine_bridge_overview() -> HTMLResponse:
         entry_ticket = load_ticket(state.entry_ticket_id) if state.entry_ticket_id else None
         close_ticket = load_ticket(state.close_ticket_id) if state.close_ticket_id else None
         live_mark = state.latest_live_mark or {}
-        live_pnl = live_mark.get("estimated_pnl")
-        pnl_text = "n/a" if live_pnl is None else str(live_pnl)
+        entry_price_text = _bridge_state_price_text(live_mark, "entry_credit_reference")
+        current_price_text = _bridge_state_close_quote_text(live_mark)
+        current_open_text = _bridge_state_open_quote_text(live_mark)
+        target_close_text = _format_bridge_number(
+            _latest_bridge_event_price_value(
+                getattr(state, "event_log", []),
+                "target_close_debit",
+                event_type="CLOSE",
+            )
+        )
+        pnl_text = _bridge_state_pnl_text(live_mark)
         latest_close = _latest_bridge_event(state, "CLOSE")
         latest_close_text = "n/a"
         if latest_close:
@@ -1432,6 +1613,10 @@ def _render_pine_bridge_overview() -> HTMLResponse:
               <p><strong>Last Event:</strong> {escape(str(state.last_event_type or 'n/a'))}</p>
               <p><strong>Last Close:</strong> {escape(latest_close_text)}</p>
               <p><strong>Updated:</strong> {escape(state.updated_at)}</p>
+              <p><strong>Entry Price:</strong> {escape(entry_price_text)}</p>
+              <p><strong>Close Price Now:</strong> {escape(current_price_text)} <span class="muted">(E*TRADE chain)</span></p>
+              <p><strong>Open Credit Now:</strong> {escape(current_open_text)}</p>
+              <p><strong>Pine Target Close:</strong> {escape(target_close_text)}</p>
               <p><strong>Live P/L:</strong> {escape(pnl_text)}</p>
               <p><strong>Entry Ticket:</strong> {f'<a href="/tickets/{escape(state.entry_ticket_id)}">{escape(state.entry_ticket_id)}</a>' if entry_ticket else escape(str(state.entry_ticket_id or 'n/a'))}</p>
               <p><strong>Close Ticket:</strong> {f'<a href="/tickets/{escape(state.close_ticket_id)}">{escape(state.close_ticket_id)}</a>' if close_ticket else escape(str(state.close_ticket_id or 'n/a'))}</p>
@@ -1503,6 +1688,10 @@ def _render_pine_bridge_overview() -> HTMLResponse:
       color: #4b5563;
       font-size: 12px;
     }}
+    .muted {{
+      color: #6b7280;
+      font-size: 12px;
+    }}
     .event-table {{
       width: 100%;
       border-collapse: collapse;
@@ -1525,6 +1714,16 @@ def _render_pine_bridge_overview() -> HTMLResponse:
     .event-type {{
       font-weight: 700;
     }}
+    .price-main {{
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .price-meta {{
+      color: #6b7280;
+      font-size: 12px;
+      margin-top: 3px;
+      line-height: 1.35;
+    }}
     .event-entry .event-type {{
       color: #0f766e;
     }}
@@ -1545,9 +1744,253 @@ def _render_pine_bridge_overview() -> HTMLResponse:
     {_render_app_nav("pine")}
     <h1>Pine Bridge</h1>
     <p>This view tracks TradingView/Pine state objects, linked entry and close tickets, and the latest live mark data gathered on the Python side.</p>
+    <p><a href="/pine-bridge/calibration">Open Calibration Report</a> <span class="muted">Compare Pine target credits/debits against live E*TRADE chain snapshots.</span></p>
     <div class="grid">
       {''.join(state_cards) or '<section class="panel"><h2>No Pine states yet</h2><p>Once TradingView sends ENTRY or MANAGE alerts, they will show up here.</p></section>'}
     </div>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(body)
+
+
+def _calibration_metric(
+    summary: dict[str, object],
+    key: str,
+    stat: str,
+) -> object | None:
+    overall = summary.get("overall")
+    if not isinstance(overall, dict):
+        return None
+    metrics = overall.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    metric = metrics.get(key)
+    if not isinstance(metric, dict):
+        return None
+    return metric.get(stat)
+
+
+def _calibration_metric_count(summary: dict[str, object], key: str) -> int:
+    value = _calibration_metric(summary, key, "count")
+    number = _as_float(value)
+    return int(number or 0)
+
+
+def _render_calibration_metric_card(
+    title: str,
+    summary: dict[str, object],
+    metric_key: str,
+    description: str,
+) -> str:
+    count = _calibration_metric_count(summary, metric_key)
+    median = _calibration_metric(summary, metric_key, "median")
+    avg = _calibration_metric(summary, metric_key, "avg")
+    min_value = _calibration_metric(summary, metric_key, "min")
+    max_value = _calibration_metric(summary, metric_key, "max")
+    return f"""
+    <article class="cal-card">
+      <h2>{escape(title)}</h2>
+      <p class="metric-main">{escape(_format_bridge_number(median, signed=True))}</p>
+      <p>{escape(description)}</p>
+      <p class="muted">n={count} | avg {escape(_format_bridge_number(avg, signed=True))} | range {escape(_format_bridge_number(min_value, signed=True))} to {escape(_format_bridge_number(max_value, signed=True))}</p>
+    </article>
+    """
+
+
+def _render_pine_calibration() -> HTMLResponse:
+    report = build_pine_calibration_report(list_pine_states())
+    summary = report.get("summary") if isinstance(report, dict) else {}
+    if not isinstance(summary, dict):
+        summary = {}
+    rows = report.get("rows") if isinstance(report, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    overall = summary.get("overall") if isinstance(summary, dict) else {}
+    overall_count = overall.get("count", 0) if isinstance(overall, dict) else 0
+    calibratable_count = (
+        overall.get("calibratable_count", 0) if isinstance(overall, dict) else 0
+    )
+    aux_fallback_count = summary.get("aux_fallback_count", 0)
+    recommendations = summary.get("recommendations")
+    if not isinstance(recommendations, list):
+        recommendations = []
+
+    rec_html = "".join(
+        f"<li>{escape(str(item))}</li>" for item in recommendations
+    ) or "<li>No recommendations yet.</li>"
+
+    table_rows = []
+    for row in reversed(rows[-120:]):
+        event_type = str(row.get("event_type") or "n/a")
+        reason = str(row.get("reason") or "n/a")
+        window = str(row.get("event_window") or "n/a")
+        stress = row.get("surface_stress")
+        z_trend = row.get("z_trend")
+        model_bg = row.get("model_background_stress")
+        aux_basis = str(row.get("aux_basis") or "n/a")
+        table_rows.append(
+            f"""
+            <tr>
+              <td><strong>{escape(event_type)}</strong><br><span class="muted">{escape(reason)}</span></td>
+              <td>{escape(window)}</td>
+              <td>{escape(_format_bridge_number(row.get('target_entry_credit')))}</td>
+              <td>{escape(_format_bridge_number(row.get('open_mid_credit')))} / {escape(_format_bridge_number(row.get('open_natural_credit')))}</td>
+              <td class="num">{escape(_format_bridge_number(row.get('entry_mid_gap'), signed=True))} / {escape(_format_bridge_number(row.get('entry_natural_gap'), signed=True))}</td>
+              <td>{escape(_format_bridge_number(row.get('target_close_debit')))}</td>
+              <td>{escape(_format_bridge_number(row.get('close_mid_debit')))} / {escape(_format_bridge_number(row.get('close_natural_debit')))}</td>
+              <td class="num">{escape(_format_bridge_number(row.get('close_mid_gap'), signed=True))} / {escape(_format_bridge_number(row.get('close_natural_gap'), signed=True))}</td>
+              <td>{escape(str(row.get('regime') or 'n/a'))}<br><span class="muted">stress {escape(_format_bridge_number(stress))} | zTrend {escape(_format_bridge_number(z_trend, signed=True))} | bg {escape(_format_bridge_number(model_bg))}</span></td>
+              <td>{escape(str(row.get('processed_at') or row.get('bar_time') or 'n/a'))}<br><span class="muted">{escape(str(row.get('source') or 'n/a'))} | {escape(aux_basis)}</span></td>
+            </tr>
+            """
+        )
+
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pine Bridge Calibration</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(139, 94, 52, 0.12), transparent 32%),
+        linear-gradient(180deg, #f7f3ea 0%, #efe6d5 100%);
+      color: #1f2933;
+    }}
+    main {{
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }}
+    h1, h2 {{
+      font-family: Georgia, "Times New Roman", serif;
+      margin-top: 0;
+    }}
+    .toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 16px 0 22px;
+    }}
+    .toolbar a {{
+      border: 1px solid #d8c9aa;
+      border-radius: 999px;
+      color: #6f5634;
+      padding: 8px 12px;
+      text-decoration: none;
+      background: #fffaf1;
+      font-weight: 650;
+    }}
+    .cal-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }}
+    .cal-card,
+    .panel {{
+      background: #fffaf1;
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 12px 30px rgba(63, 46, 25, 0.08);
+    }}
+    .metric-main {{
+      font-size: 34px;
+      font-weight: 800;
+      margin: 6px 0;
+      color: #0f766e;
+    }}
+    .muted {{
+      color: #6b7280;
+      font-size: 12px;
+    }}
+    .cal-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 13px;
+      background: #fffaf1;
+      border: 1px solid #d8c9aa;
+      border-radius: 16px;
+      overflow: hidden;
+    }}
+    .cal-table th,
+    .cal-table td {{
+      border-top: 1px solid #eadfca;
+      padding: 9px 8px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    .cal-table th {{
+      color: #6f5634;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: #f8f4ec;
+    }}
+    .num {{
+      font-weight: 750;
+      white-space: nowrap;
+    }}
+    a {{
+      color: #8b5e34;
+    }}
+    {_app_nav_styles()}
+  </style>
+</head>
+<body>
+  <main>
+    {_render_app_nav("pine")}
+    <h1>Pine Bridge Calibration</h1>
+    <p>Compare Pine-modeled ENTRY credits and CLOSE debits against live E*TRADE chain snapshots stored in bridge event logs.</p>
+    <div class="toolbar">
+      <a href="/pine-bridge">Back to Pine Bridge</a>
+      <a href="/pine-bridge/calibration.json">JSON report</a>
+      <a href="/pine-bridge/calibration.csv">CSV export</a>
+    </div>
+    <section class="cal-grid">
+      <article class="cal-card">
+        <h2>Sample</h2>
+        <p class="metric-main">{escape(str(calibratable_count))}</p>
+        <p>Calibratable rows out of {escape(str(overall_count))} bridge events.</p>
+        <p class="muted">Rows using latest-aux fallback: {escape(str(aux_fallback_count))}</p>
+      </article>
+      {_render_calibration_metric_card("Entry Mid Gap", summary, "entry_mid_gap", "Live open mid credit minus Pine target entry credit.")}
+      {_render_calibration_metric_card("Close Mid Gap", summary, "close_mid_gap", "Live close mid debit minus Pine target close debit.")}
+      {_render_calibration_metric_card("Close Natural Gap", summary, "close_natural_gap", "Live natural close debit minus Pine target close debit.")}
+    </section>
+    <section class="panel">
+      <h2>Calibration Read</h2>
+      <ul>{rec_html}</ul>
+      <p class="muted">Positive close gaps mean live broker debit is richer/more expensive than Pine expected. Positive entry gaps mean live broker credit is richer than Pine expected.</p>
+    </section>
+    <section class="panel" style="margin-top:16px;">
+      <h2>Recent Rows</h2>
+      <p class="muted">Showing the latest {escape(str(min(len(rows), 120)))} rows. Gap columns show mid / natural.</p>
+      <table class="cal-table">
+        <thead>
+          <tr>
+            <th>Event</th>
+            <th>Win</th>
+            <th>Target Entry</th>
+            <th>Live Open</th>
+            <th>Entry Gap</th>
+            <th>Target Close</th>
+            <th>Live Close</th>
+            <th>Close Gap</th>
+            <th>State</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {''.join(table_rows) or '<tr><td colspan="10">No bridge calibration rows yet.</td></tr>'}
+        </tbody>
+      </table>
+    </section>
   </main>
 </body>
 </html>"""
@@ -3354,6 +3797,31 @@ async def pine_bridge_states() -> dict[str, object]:
 @app.get("/pine-bridge", response_class=HTMLResponse)
 async def pine_bridge_overview() -> HTMLResponse:
     return _render_pine_bridge_overview()
+
+
+@app.get("/pine-bridge/calibration", response_class=HTMLResponse)
+async def pine_bridge_calibration() -> HTMLResponse:
+    return _render_pine_calibration()
+
+
+@app.get("/pine-bridge/calibration.json")
+async def pine_bridge_calibration_json() -> dict[str, object]:
+    return build_pine_calibration_report(list_pine_states())
+
+
+@app.get("/pine-bridge/calibration.csv")
+async def pine_bridge_calibration_csv() -> Response:
+    report = build_pine_calibration_report(list_pine_states())
+    rows = report.get("rows")
+    if not isinstance(rows, list):
+        rows = []
+    return Response(
+        pine_calibration_csv(rows),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="pine-bridge-calibration.csv"'
+        },
+    )
 
 
 @app.get("/pine-bridge/states/{state_id}")

@@ -120,3 +120,13 @@ The web server reads `comms.engine_ingest_secret` from `configs/bot.yaml` (or `E
 For server deploys, both engine and web also support:
 - `STARSHIP_ENV_FILE`
 - `STARSHIP_SECRETS_DIR`
+
+## Permanent hosting
+
+Use this runbook for the stable hosted lane:
+
+```text
+docs/permanent-hosting.md
+```
+
+The short version is Google Cloud Compute Engine for `starship-hermes.app`, with Render kept as the simpler fallback lane if we later want a dashboard-managed deployment.

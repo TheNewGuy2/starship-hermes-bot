@@ -4,7 +4,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/starship-alpha/app}"
 REPO_URL="${REPO_URL:-https://github.com/TheNewGuy2/starship-hermes-bot.git}"
 BRANCH="${BRANCH:-main}"
-BOT_DOMAIN="${BOT_DOMAIN:-}"
+BOT_DOMAIN="${BOT_DOMAIN:-starship-hermes.app}"
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker/docker-compose.gcp.yml}"
 
 echo "[starship] App dir: ${APP_DIR}"
@@ -78,27 +78,16 @@ echo "[starship] Local health check..."
 curl --fail --silent --show-error http://127.0.0.1:8000/health
 echo
 
-if [[ -n "${BOT_DOMAIN}" ]]; then
-  echo "[starship] Configuring Caddy for ${BOT_DOMAIN}..."
-  sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
+echo "[starship] Configuring Caddy for ${BOT_DOMAIN}..."
+sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 ${BOT_DOMAIN} {
     reverse_proxy 127.0.0.1:8000
 }
 EOF
-  sudo systemctl reload caddy
-  echo "[starship] HTTPS check. This can fail until DNS points ${BOT_DOMAIN} to this VM."
-  curl --fail --silent --show-error "https://${BOT_DOMAIN}/health" || true
-  echo
-else
-  cat <<'NEXT'
-[starship] BOT_DOMAIN was not set, so Caddy was not configured yet.
-
-After DNS is ready, run:
-
-  BOT_DOMAIN="bot.yourdomain.com" bash deploy/gcp/setup-vm-app.sh
-
-NEXT
-fi
+sudo systemctl reload caddy
+echo "[starship] HTTPS check. This can fail until DNS points ${BOT_DOMAIN} to this VM."
+curl --fail --silent --show-error "https://${BOT_DOMAIN}/health" || true
+echo
 
 cat <<'DONE'
 

@@ -84,14 +84,17 @@ Recommended layout:
 ## First-time VM setup
 
 1. Create a small Ubuntu Compute Engine VM.
-2. Install Docker and Docker Compose plugin.
-3. Clone this repo to:
+2. Reserve a static external IPv4 address for the VM.
+3. Point DNS for `starship-hermes.app` at that static IP.
+4. Open inbound firewall access for `80/tcp` and `443/tcp`.
+5. Install Docker and Docker Compose plugin.
+6. Clone this repo to:
 
 ```text
 /opt/starship-alpha/app
 ```
 
-4. Copy:
+7. Copy:
 
 - [deploy/env/.env.example](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/env/.env.example:1)
 
@@ -101,14 +104,14 @@ to:
 /opt/starship-alpha/app/deploy/env/starship.env
 ```
 
-5. Fill in the low-risk env values in `starship.env`.
-6. Create:
+8. Fill in the low-risk env values in `starship.env`.
+9. Create:
 
 ```text
 /opt/starship-alpha/app/deploy/env/secrets
 ```
 
-7. Put the sensitive values there as file-per-secret, or use [deploy/gcp/render-secrets.sh](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/gcp/render-secrets.sh:1) to render them from Secret Manager.
+10. Put the sensitive values there as file-per-secret, or use [deploy/gcp/render-secrets.sh](C:/Users/Gethe/starship-alpha-bot-main/starship-alpha-bot-main/deploy/gcp/render-secrets.sh:1) to render them from Secret Manager.
 
 Example secret names:
 
@@ -122,7 +125,7 @@ Example secret names:
 - `ETRADE_OAUTH_TOKEN`
 - `ETRADE_OAUTH_TOKEN_SECRET`
 
-8. Start the stable web app once manually:
+11. Start the stable web app once manually:
 
 ```bash
 cd /opt/starship-alpha/app
@@ -130,12 +133,32 @@ docker compose -f deploy/docker/docker-compose.gcp.yml up -d --build starship-we
 curl http://127.0.0.1:8000/health
 ```
 
-9. Put HTTPS in front of it.
+12. Put HTTPS in front of it.
 
 Recommended:
 
-- Caddy or Nginx on the VM
+- Caddy on the VM for `starship-hermes.app`
 - or a Google HTTPS load balancer later if you want more infrastructure
+
+This repo's VM setup helper can configure Caddy when `BOT_DOMAIN` is passed:
+
+```bash
+BOT_DOMAIN="starship-hermes.app" bash deploy/gcp/setup-vm-app.sh
+```
+
+`BOT_DOMAIN` now defaults to `starship-hermes.app`, so passing it explicitly is optional.
+
+From your local Windows repo, check whether Cloudflare DNS has propagated:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check_starship_domain_dns.ps1 -ExpectedIp YOUR_GCP_STATIC_IP
+```
+
+Once DNS and Caddy are working, the stable TradingView webhook is:
+
+```text
+https://starship-hermes.app/webhooks/tradingview
+```
 
 ## GitHub Actions auto-deploy
 

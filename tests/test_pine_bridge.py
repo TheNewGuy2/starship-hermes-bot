@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from starship_web.pine_bridge import _parse_bar_date, process_pine_alert
+from starship_web.pine_calibration import build_pine_calibration_report
 from starship_web.pine_models import parse_pine_alert_payload
 from starship_web.pine_state_store import list_pine_states
 from starship_web.ticket_store import list_tickets
@@ -122,6 +123,83 @@ class StrictSpxChainClient(FakeClient):
             pair["Put"]["optionRootSymbol"] = "SPXW"
             pair["Call"]["optionRootSymbol"] = "SPXW"
         return payload
+
+
+class DualRootMonthlyExpiryClient(FakeClient):
+    def __init__(self):
+        self.option_chain_symbols: list[str] = []
+        self.preview_requests: list[dict] = []
+
+    def get_option_expire_dates(self, symbol, expiry_type="ALL"):
+        return {
+            "OptionExpireDateResponse": {
+                "ExpirationDate": [
+                    {"year": 2026, "month": 5, "day": 15},
+                ]
+            }
+        }
+
+    def get_option_chain(
+        self,
+        symbol,
+        *,
+        expiry_year,
+        expiry_month,
+        expiry_day,
+        include_weekly=True,
+        price_type="ALL",
+    ):
+        self.option_chain_symbols.append(symbol)
+        if symbol == "SPXW":
+            raise RuntimeError("SPXW is invalid for option-chain lookup")
+        pairs = []
+        for strike, put_bid, put_ask, call_bid, call_ask in [
+            (7085, 0.05, 0.10, 29.00, 30.00),
+            (7105, 0.20, 0.30, 48.00, 49.00),
+            (7115, 0.15, 0.25, 28.00, 29.00),
+            (7135, 0.05, 0.10, 0.05, 0.10),
+        ]:
+            for root_symbol in ("SPX", "SPXW"):
+                pairs.append(
+                    {
+                        "Put": {
+                            "optionRootSymbol": root_symbol,
+                            "strikePrice": strike,
+                            "bid": put_bid,
+                            "ask": put_ask,
+                            "lastPrice": round((put_bid + put_ask) / 2.0, 2),
+                            "osiKey": f"{root_symbol}--260515P{strike:08.0f}",
+                            "openInterest": 10,
+                            "volume": 5,
+                            "timeStamp": "now",
+                        },
+                        "Call": {
+                            "optionRootSymbol": root_symbol,
+                            "strikePrice": strike,
+                            "bid": call_bid,
+                            "ask": call_ask,
+                            "lastPrice": round((call_bid + call_ask) / 2.0, 2),
+                            "osiKey": f"{root_symbol}--260515C{strike:08.0f}",
+                            "openInterest": 11,
+                            "volume": 6,
+                            "timeStamp": "now",
+                        },
+                    }
+                )
+        return {
+            "OptionChainResponse": {
+                "SelectedED": {
+                    "year": expiry_year,
+                    "month": expiry_month,
+                    "day": expiry_day,
+                },
+                "OptionPair": pairs,
+            }
+        }
+
+    def preview_order(self, account_id_key, preview_request):
+        self.preview_requests.append(preview_request)
+        return super().preview_order(account_id_key, preview_request)
 
 
 class FailingRefreshClient(FakeClient):
@@ -321,12 +399,29 @@ def test_pine_bridge_entry_manage_close_flow(isolated_bridge):
         == "IRON_CONDOR"
     )
     assert entry["live_mark"]["entry_credit_reference"] == pytest.approx(1.45, abs=1e-9)
+    entry_price = entry["state"]["event_log"][-1]["price"]
+    assert entry_price["display_label"] == "Entry credit"
+    assert entry_price["display_value"] == pytest.approx(1.45, abs=1e-9)
+    assert entry_price["close_mid_debit"] is not None
+    assert entry_price["target_entry_mid_gap"] is not None
+    entry_event = entry["state"]["event_log"][-1]
+    assert entry_event["aux"]["vix1d"] == pytest.approx(18.2, abs=1e-9)
+    assert entry_event["strikes"]["short_put"] == pytest.approx(7105, abs=1e-9)
 
     manage = process_pine_alert(_manage_payload(), client=client)
     assert manage["ok"] is True
     assert manage["state"]["status"] == "open"
     assert manage["state"]["latest_aux"]["vix1d"] == pytest.approx(17.9, abs=1e-9)
     assert manage["live_mark"]["close_mid_debit"] is not None
+    manage_price = manage["state"]["event_log"][-1]["price"]
+    assert manage_price["display_label"] == "Close mid debit"
+    assert manage_price["display_value"] == pytest.approx(
+        manage["live_mark"]["close_mid_debit"], abs=1e-9
+    )
+    assert manage_price["pnl_mid_usd"] is not None
+    manage_event = manage["state"]["event_log"][-1]
+    assert manage_event["aux"]["zShortRisk"] == pytest.approx(1.18, abs=1e-9)
+    assert manage_event["strikes"]["short_call"] == pytest.approx(7115, abs=1e-9)
 
     close = process_pine_alert(_close_payload(), client=client)
     assert close["ok"] is True
@@ -338,11 +433,44 @@ def test_pine_bridge_entry_manage_close_flow(isolated_bridge):
         close["close_ticket"]["preview_request"]["PreviewOrderRequest"]["orderType"]
         == "IRON_CONDOR"
     )
+    close_price = close["state"]["event_log"][-1]["price"]
+    assert close_price["display_label"] == "Close mid debit"
+    assert close_price["display_value"] == pytest.approx(
+        close["live_mark"]["close_mid_debit"], abs=1e-9
+    )
+    assert close_price["target_close_mid_gap"] is not None
 
     states = list_pine_states()
     tickets = list_tickets()
     assert len(states) == 1
     assert len(tickets) == 2
+
+
+def test_pine_calibration_report_summarizes_live_vs_pine_gaps(isolated_bridge):
+    client = isolated_bridge
+
+    process_pine_alert(_entry_payload(), client=client)
+    process_pine_alert(_manage_payload(), client=client)
+    process_pine_alert(_close_payload(), client=client)
+
+    report = build_pine_calibration_report(list_pine_states())
+
+    assert report["ok"] is True
+    rows = report["rows"]
+    entry_row = next(row for row in rows if row["event_type"] == "ENTRY")
+    close_row = next(row for row in rows if row["event_type"] == "CLOSE")
+    assert entry_row["entry_mid_gap"] is not None
+    assert entry_row["entry_natural_gap"] is not None
+    assert close_row["close_mid_gap"] is not None
+    assert close_row["close_natural_gap"] is not None
+    assert entry_row["aux_basis"] == "event_aux"
+    assert entry_row["short_put"] == pytest.approx(7105, abs=1e-9)
+
+    summary = report["summary"]
+    assert summary["overall"]["calibratable_count"] >= 2
+    assert summary["by_event_type"]["ENTRY"]["metrics"]["entry_mid_gap"]["count"] == 1
+    assert summary["by_event_type"]["CLOSE"]["metrics"]["close_mid_gap"]["count"] == 1
+    assert summary["recommendations"]
 
 
 def test_pine_bridge_manage_after_close_does_not_reopen_state(isolated_bridge):
@@ -414,6 +542,40 @@ def test_pine_bridge_live_mark_uses_spx_for_spxw_preview_symbols(monkeypatch, tm
     assert manage["ok"] is True
     assert manage["live_mark"]["matched_symbol"] == "SPX"
     assert "SPXW" not in client.option_chain_symbols
+
+
+def test_pine_bridge_prefers_spxw_contract_root_on_monthly_spx_expiry(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ETRADE_DEFAULT_ACCOUNT_ID_KEY", "demo-account")
+    monkeypatch.delenv("TRADINGVIEW_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("PINE_BRIDGE_POINT_VALUE", "100")
+    client = DualRootMonthlyExpiryClient()
+    payload = _entry_payload()
+    payload.update(
+        {
+            "event_id": "evt-entry-monthly-expiry",
+            "position_key": "spx-monthly-expiry",
+            "option_root": "SPX",
+            "bar_time": "2026-05-15T10:35:00-05:00",
+        }
+    )
+
+    entry = process_pine_alert(payload, client=client)
+
+    assert entry["ok"] is True
+    assert {leg["symbol"] for leg in entry["ticket"]["legs"]} == {"SPXW"}
+    assert {
+        leg["broker_payload"]["option_root_symbol"]
+        for leg in entry["ticket"]["legs"]
+    } == {"SPXW"}
+    instruments = entry["ticket"]["preview_request"]["PreviewOrderRequest"]["Order"][0][
+        "Instrument"
+    ]
+    assert {leg["Product"]["symbol"] for leg in instruments} == {"SPXW"}
+    assert set(client.option_chain_symbols) == {"SPX"}
 
 
 def test_pine_bridge_manage_records_event_when_live_mark_fails(monkeypatch, tmp_path: Path):

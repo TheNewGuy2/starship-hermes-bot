@@ -5,24 +5,24 @@ This guide is the plain-English setup path for the stable Hermes/Pine Bridge dep
 The goal is:
 
 - Firebase project: the umbrella Google project and optional public landing page.
-- Firebase Hosting: a simple public page like `www.example.com`.
+- Firebase Hosting: an optional simple public page like `www.starship-hermes.app`.
 - Google Cloud Compute Engine VM: the real Python app that receives TradingView alerts and talks to E*TRADE.
-- Stable webhook: `https://bot.example.com/webhooks/tradingview`.
+- Stable webhook: `https://starship-hermes.app/webhooks/tradingview`.
 
 ## The important mental model
 
 There are four separate pieces that are easy to blur together:
 
 1. Domain registrar
-   - This is where you buy the domain name, like `example.com`.
+   - This is where you buy the domain name, like `starship-hermes.app`.
    - Firebase does not really replace this. If you do not already own a domain, buy one from a registrar such as Squarespace, Cloudflare, Namecheap, etc.
 
 2. DNS
    - DNS is the address book for the domain.
    - It decides where each subdomain goes.
    - Example:
-     - `www.example.com` goes to Firebase Hosting.
-     - `bot.example.com` goes to the Google Cloud VM.
+     - `www.starship-hermes.app` can go to Firebase Hosting later.
+     - `starship-hermes.app` goes to the Google Cloud VM.
 
 3. Firebase Hosting
    - Great for a simple website, landing page, docs page, or dashboard launcher.
@@ -36,24 +36,24 @@ There are four separate pieces that are easy to blur together:
 
 ## Recommended domain layout
 
-Use one domain with two subdomains:
+Use the root domain for the live bot app:
 
 ```text
-www.example.com
-```
-
-Public Firebase-hosted page. Optional but nice.
-
-```text
-bot.example.com
+starship-hermes.app
 ```
 
 Private Starship/Hermes app on the Google Cloud VM. TradingView sends alerts here.
 
+Optional public Firebase-hosted page later:
+
+```text
+www.starship-hermes.app
+```
+
 The TradingView webhook URL should be:
 
 ```text
-https://bot.example.com/webhooks/tradingview
+https://starship-hermes.app/webhooks/tradingview
 ```
 
 Do not point TradingView at the Firebase `www` page.
@@ -78,27 +78,17 @@ You now have a Firebase project and a matching Google Cloud project.
 
 ## Phase 2 - Buy or choose a domain
 
-If you already own a domain, use it.
-
-If not, buy one from a domain registrar. A simple example:
+We are using:
 
 ```text
-your-hermes-domain.com
+starship-hermes.app
 ```
 
-For this guide, replace:
+Recommended layout:
 
 ```text
-example.com
-```
-
-with your real domain.
-
-Recommended subdomains:
-
-```text
-www.example.com
-bot.example.com
+starship-hermes.app      -> Google Cloud VM
+www.starship-hermes.app  -> optional Firebase landing page later
 ```
 
 ## Phase 3 - Create the Google Cloud VM from Cloud Shell
@@ -134,7 +124,7 @@ The script creates:
 
 At the end it prints the static IP. Save it.
 
-## Phase 4 - Point `bot.example.com` to the VM
+## Phase 4 - Point `starship-hermes.app` to the VM
 
 Go to your domain registrar's DNS settings.
 
@@ -142,7 +132,7 @@ Create this DNS record:
 
 ```text
 Type: A
-Name/Host: bot
+Name/Host: @
 Value/Address: the STATIC_IP from Cloud Shell
 TTL: Auto or 300
 ```
@@ -150,7 +140,7 @@ TTL: Auto or 300
 Example:
 
 ```text
-bot.example.com -> 34.123.45.67
+starship-hermes.app -> 34.123.45.67
 ```
 
 Wait a few minutes. Sometimes DNS takes longer.
@@ -172,13 +162,13 @@ curl -fsSL https://raw.githubusercontent.com/TheNewGuy2/starship-hermes-bot/main
 bash /tmp/setup-vm-app.sh
 ```
 
-If your DNS record for `bot.example.com` is already pointed to the VM static IP, run:
+If your DNS record for `starship-hermes.app` is already pointed to the VM static IP, run:
 
 ```bash
-BOT_DOMAIN="bot.example.com" bash /tmp/setup-vm-app.sh
+BOT_DOMAIN="starship-hermes.app" bash /tmp/setup-vm-app.sh
 ```
 
-Replace `bot.example.com` with your real bot subdomain.
+The `.app` TLD requires HTTPS, so wait for DNS to resolve before expecting browsers to load the site cleanly.
 
 ## Phase 6 - Add secrets privately on the VM
 
@@ -238,10 +228,10 @@ Expected result:
 
 ## Phase 8 - Put HTTPS in front with Caddy
 
-Replace `bot.example.com` with your real bot subdomain:
+Use the production domain:
 
 ```bash
-export BOT_DOMAIN="bot.example.com"
+export BOT_DOMAIN="starship-hermes.app"
 
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 $BOT_DOMAIN {
@@ -266,7 +256,7 @@ If this fails immediately after DNS changes, wait a few minutes and retry.
 Open this in your browser:
 
 ```text
-https://bot.example.com/broker/etrade
+https://starship-hermes.app/broker/etrade
 ```
 
 Steps:
@@ -303,14 +293,14 @@ You can use Firebase Hosting for:
 Connect:
 
 ```text
-www.example.com
+www.starship-hermes.app
 ```
 
 to Firebase Hosting.
 
 Firebase will show you DNS records to add. Add exactly what Firebase gives you.
 
-Do not connect `bot.example.com` to Firebase Hosting. `bot.example.com` must point to the VM.
+Do not connect `starship-hermes.app` to Firebase Hosting. `starship-hermes.app` must point to the VM.
 
 ## Phase 11 - Update TradingView
 
@@ -318,7 +308,7 @@ In TradingView alert settings:
 
 ```text
 Webhook URL:
-https://bot.example.com/webhooks/tradingview
+https://starship-hermes.app/webhooks/tradingview
 ```
 
 The alert JSON must include:
@@ -335,11 +325,11 @@ Keep using the Pine script alert payload we patched earlier.
 
 Each morning:
 
-1. Open `https://bot.example.com/health`.
-2. Open `https://bot.example.com/broker/etrade`.
+1. Open `https://starship-hermes.app/health`.
+2. Open `https://starship-hermes.app/broker/etrade`.
 3. Re-auth E*TRADE if the token expired.
-4. Open `https://bot.example.com/pine-bridge`.
-5. Confirm TradingView webhook is still `https://bot.example.com/webhooks/tradingview`.
+4. Open `https://starship-hermes.app/pine-bridge`.
+5. Confirm TradingView webhook is still `https://starship-hermes.app/webhooks/tradingview`.
 6. Watch `/pine-bridge` and `/tickets` during the day.
 
 ## Phase 13 - GitHub Actions later

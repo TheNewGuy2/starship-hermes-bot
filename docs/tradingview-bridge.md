@@ -290,7 +290,43 @@ If Hermes already has JSON-alert helper code, it is usually better to extend tha
 - `note`
 - `aux`
 
-The parser also pulls common aux fields like `vix1d`, `vix`, `vix9d`, `vvix`, `skew`, `add`, `vx1`, `vx2`, `ivrv`, `regime`, and the Hermes z-stack fields into the saved state.
+The parser also pulls common aux fields like `vix1d`, `vix`, `vix9d`, `vvix`, `skew`, `add`, `vx1`, `vx2`, `ivrv`, `pop_between`, `regime`, surface scores, vol-compression, and the Hermes z-stack fields into the saved state.
+
+For calibration, send as many of these optional Pine model-driver fields as possible:
+
+- `mins_from_open`
+- `mins_left_rth`
+- `afternoon`
+- `entry_width`
+- `entry_put_width`
+- `entry_call_width`
+- `entry_sigma`
+- `entry_center`
+- `entry_profile`
+- `entry_profile_code`
+- `entry_profile_strength`
+- `entry_profile_confidence`
+- `entry_quality_score`
+- `model_mark_debit`
+- `model_close_debit`
+- `model_capture_frac`
+- `model_time_left_frac`
+- `model_risk_norm`
+- `model_center_quality`
+- `model_put_threat`
+- `model_call_threat`
+- `model_put_far_otm`
+- `model_call_far_otm`
+- `model_put_near_short`
+- `model_call_near_short`
+- `model_late_gamma`
+- `model_surface_stress`
+- `model_fast_tape`
+- `model_background_stress`
+- `model_put_extrinsic_frac`
+- `model_call_extrinsic_frac`
+
+The backend also accepts the Pine variable-style names for the model fields, such as `modelCloseDebitPts`, `modelTimeLeftFrac`, and `modelBackgroundStressScore`. New event logs preserve `aux` and strike snapshots per event, so later reports can bucket live-vs-Pine gaps by the exact state that generated each alert.
 
 `bar_time` can be:
 
@@ -313,6 +349,14 @@ Inspect one state:
 GET /pine-bridge/states/{state_id}
 ```
 
+Open the calibration report:
+
+```text
+GET /pine-bridge/calibration
+GET /pine-bridge/calibration.json
+GET /pine-bridge/calibration.csv
+```
+
 The state response includes:
 
 - active/inactive status
@@ -321,6 +365,15 @@ The state response includes:
 - last Pine payload
 - latest aux snapshot
 - latest live mark/P&L snapshot
+- recent event-level price, aux, and strike snapshots
+
+The calibration report computes:
+
+- live open mid/natural credit minus Pine `target_entry_credit`
+- live close mid/natural debit minus Pine `target_close_debit`
+- ratios of live price to Pine target
+- summaries by event type, reason, and AM/PM window
+- a short tuning read for whether Pine entry credit or close debit is too cheap/rich versus live chain prices
 
 ## Behavior notes
 

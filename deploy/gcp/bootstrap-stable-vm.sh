@@ -6,6 +6,7 @@ ZONE="${ZONE:-us-west1-a}"
 REGION="${REGION:-${ZONE%-*}}"
 VM_NAME="${VM_NAME:-starship-hermes-web}"
 ADDRESS_NAME="${ADDRESS_NAME:-starship-hermes-ip}"
+DOMAIN_NAME="${DOMAIN_NAME:-starship-hermes.app}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-small}"
 BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-30GB}"
 
@@ -23,6 +24,7 @@ Optional overrides:
   ZONE="us-west1-a"
   VM_NAME="starship-hermes-web"
   ADDRESS_NAME="starship-hermes-ip"
+  DOMAIN_NAME="starship-hermes.app"
   MACHINE_TYPE="e2-small"
 USAGE
   exit 2
@@ -33,6 +35,7 @@ echo "[starship] Zone: ${ZONE}"
 echo "[starship] Region: ${REGION}"
 echo "[starship] VM: ${VM_NAME}"
 echo "[starship] Static IP name: ${ADDRESS_NAME}"
+echo "[starship] Domain: ${DOMAIN_NAME}"
 
 gcloud config set project "${PROJECT_ID}"
 
@@ -94,8 +97,11 @@ Save these values:
 Next DNS step:
 
   Create an A record:
-    Host/Name: bot
+    Host/Name: @
     Value:     ${STATIC_IP}
+
+  For the production domain, that means:
+    ${DOMAIN_NAME} -> ${STATIC_IP}
 
 After DNS is pointed, SSH to the VM:
 
